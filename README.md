@@ -1,112 +1,85 @@
 # Jackify Game Downgrader
 
-Downgrades a Steam install of a modded game on Linux (Steam Deck or desktop)
-to an older pinned build, for script-extender/mod compatibility. Python
-stdlib only, no dependencies to install. Currently supports **Skyrim
-Special Edition** and **Fallout 4**, the two games this problem actually
-recurs for at scale in the Wabbajack ecosystem.
+Downgrades a Steam install of Skyrim Special Edition or Fallout 4 to an
+older, script-extender-compatible build. Python stdlib only, no
+dependencies.
 
 ## Why
 
-Both games got a live update that broke their script extender and a large
-share of mods built against it: Skyrim SE's Anniversary Edition update moved
-the runtime past 1.6.x (SKSE64 mods want 1.5.97 or a specific 1.6.x build),
-and Fallout 4's 2024 "Next-Gen" update did the same to F4SE (most F4SE mods
-want 1.10.163). "Downgrading" means pulling that older build's game files
-back from Steam. Existing guides do this by hand through Steam's GUI
-developer console; this tool automates it with `steamcmd` instead, since the
-GUI console can't be scripted.
+The August 2026 updates to Skyrim SE and Fallout 4, like every update before
+them, broke most modlists until each author gets time to recompile. Until
+then, downgrading the vanilla game to the previous version lets a modlist
+still be installed and played. Most downgrading tools are designed for
+Windows or still require manual steps afterwards.
+
+This tool automatically:
+
+* Pulls an older depot build via `steamcmd`, natively on Linux
+* Backs up the existing game directory (can be deleted later if you need the space)
+* Copies the depot files into place
+* Sets the game's Steam auto-update to "Only update this game when I launch it"
+* Marks the game's Steam file (the `.acf`) read-only to block updates it would otherwise still try
+* Deletes `ContentCatalog.txt` from the game's Proton prefix so Steam regenerates it
+
+Jackify Game Downgrader is standalone for now; longer term it will be
+integrated as an additional task in Jackify, my Wabbajack-on-Linux tool, but
+works fine on its own until that integration happens.
 
 ## Requirements
 
-- The game installed through Steam (not GOG/Epic).
-- Steam and the game both closed while running this.
-- A terminal. On Steam Deck, use Desktop Mode (Game Mode can't run this).
-- Your Steam login (steamcmd needs it to fetch the depots you own; you'll
-  be prompted for password / Steam Guard interactively). Your password goes
-  straight to steamcmd (Valve's own tool); this tool never sees, stores, or
-  logs it. steamcmd may cache its own login session on disk so you aren't
-  reprompted every run, which is steamcmd's own behavior, not something
-  this tool adds.
+- Game installed through Steam (not GOG/Epic).
+- Steam and the game closed while running this.
+- A terminal, e.g. Konsole (Steam Deck: Desktop Mode, not Game Mode).
+- Your Steam login. Credentials go straight to `steamcmd` (this tool never
+  sees or stores them).
 
 ## Usage
 
+### Download
+
+Download the latest release from GitHub: **[TODO: add link to the `latest`
+release once one exists]**. Extract the zip anywhere, then run the
+downgrader from a terminal inside that folder.
+
+### Running it
+
+Interactive downgrade session:
+
 ```
-./jackify-game-downgrader                                    # asks which game, then: pick a version, confirm, go
-./jackify-game-downgrader --game fallout4                     # same, skipping the game prompt
-./jackify-game-downgrader --game fallout4 --version 1.10.163   # skip the version prompt too
-./jackify-game-downgrader --dry-run                            # preview a downgrade, change nothing
-./jackify-game-downgrader list-games                           # show supported games
-./jackify-game-downgrader list-versions --game skyrim_se        # show available targets for a game
-./jackify-game-downgrader restore --game fallout4               # undo the last downgrade for that game
+./jackify-game-downgrader
 ```
 
-There is deliberately no default game. `--game` always has to be given or
-answered at the prompt, so a mistyped command can't accidentally downgrade
-the wrong install. Before changing anything, the tool copies the whole
-current install to a sibling folder next to it in the same Steam library,
-e.g. `Skyrim Special Edition (1.7.99.0)`, named after the game's own
-version, read directly from the exe (falling back to Steam's internal build
-id if that ever fails, since it's not something a person recognizes).
-`restore` deletes the downgraded folder and renames that backup back into
-place, and also reverts just that game's Steam auto-update setting. The two
-games' downgrades are otherwise fully independent, but they do share
-Steam's single `localconfig.vdf`, so revert only ever touches the one app
-entry, never the whole file.
+Other commands include:
 
-Note this backs up the *entire* game folder, not just the files being
-changed, so make sure there's enough free space in that Steam library for a
-second full copy of the game during a downgrade. Restoring only puts back
-what this tool itself changed. Run "Verify Integrity of Game Files" in
-Steam afterward too, for anything outside that (e.g. Creation Club content).
+```
+./jackify-game-downgrader --game fallout4
+./jackify-game-downgrader --game fallout4 --version 1.10.163
+./jackify-game-downgrader --dry-run                            # preview only, changes nothing
+./jackify-game-downgrader list-games
+./jackify-game-downgrader list-versions --game skyrim_se
+./jackify-game-downgrader restore --game fallout4               # undo the last downgrade
+```
 
-## After downgrading
-
-Steam will try to update the game back to latest on next launch. This tool
-sets the game's per-app "Automatic Updates" to "Only update this game when
-I launch it", but you should still either launch Steam in Offline Mode
-before playing, or avoid clicking Update if Steam prompts for one.
-
-## Adding a game / updating manifests
-
-Each supported game is one JSON file under `game_downgrade/games/` (e.g.
-`skyrim_se.json`, `fallout4.json`): appid, main executable name, depot IDs,
-and a map of version to per-depot manifest ID. No code changes are needed
-to add a new pinned version, or a new game with the same Steam-depot
-downgrade shape.
-
-Valve prunes old manifests over time, so an entry can go stale. If a
-downgrade fails with a manifest error, check:
-
-- [SteamDB](https://steamdb.info/): search the game's depot pages for
-  currently available manifests.
-- Nexus's ["Steam Manifest List for Skyrim"](https://www.nexusmods.com/skyrimspecialedition/articles/6536)
-  article (Skyrim-specific, but the community keeps it updated) and
-  equivalent Fallout 4 downgrade guides on Nexus/Steam Community for F4SE
-  pins.
-
-Then add or fix an entry in that game's JSON file.
+Before changing anything, the whole game folder is copied to a
+backup (e.g. `Skyrim Special Edition (1.7.99.0)`) in the same Steam library.
+Make sure there's room for a second full copy. `restore` puts that backup
+back and reverts the Steam settings this tool changed (auto-update
+behavior, manifest permissions); anything outside that, run Steam's "Verify
+Integrity of Game Files" for.
 
 ## Steam Deck notes
 
-This tool's own data (steamcmd, restore state) stays in `game_downgrade/data/`
-next to the extracted package, not anywhere in your home directory; Steam
-itself still lives at its usual `~/.local/share/Steam`. No root access or
-system packages are needed, so this works fine under SteamOS's read-only
-filesystem. `steamcmd`
-needs the 32-bit runtime libraries SteamOS already ships for Steam itself;
-on other distros, if `steamcmd` fails to start, that's the first thing to
-check.
+This tool's own data lives in `game_downgrade/data/`, next to the downgrader.
+No root or system packages needed; it works under read-only filesystems such
+as SteamOS. `steamcmd` needs the 32-bit runtime libs SteamOS already ships
+for Steam itself; on other distros, that's the first thing to check if
+`steamcmd` won't start.
 
 ## Limitations
 
-- Steam only. Skyrim SE (not VR/Enderal) and Fallout 4 only for now. Other
-  games weren't found to need this at any real scale in the Wabbajack
-  ecosystem, so they're out of scope until that changes.
-- No automated test suite. This is inherently I/O-heavy (real Steam
-  install, real downloads, real file swaps), so testing is a manual
-  run-through against an actual install.
-- CLI only for now; a GUI/Jackify integration is a possible future step.
+- Steam only, Skyrim SE and Fallout 4 only.
+- No automated tests; this is I/O-heavy against a real Steam install.
+- CLI only until the Jackify integration.
 
 ## License
 
