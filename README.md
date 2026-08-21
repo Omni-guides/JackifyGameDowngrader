@@ -37,9 +37,9 @@ works fine on its own until that integration happens.
 
 ### Download
 
-Download the latest release from GitHub: **[TODO: add link to the `latest`
-release once one exists]**. Extract the zip anywhere, then run the
-downgrader from a terminal inside that folder.
+Download the [latest release](https://github.com/Omni-guides/JackifyGameDowngrader/releases/latest)
+from GitHub. Extract the zip anywhere, then run the downgrader from a
+terminal inside that folder.
 
 ### Running it
 
