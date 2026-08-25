@@ -2,6 +2,8 @@
   "name": "Skyrim Special Edition",
   "appid": 489830,
   "main_exe": "SkyrimSE.exe",
+  "localappdata_dir": "Skyrim Special Edition",
+  "download_size_gb": 20,
   "depots": [489831, 489832, 489833],
   "versions": {
     "1.5.97": {

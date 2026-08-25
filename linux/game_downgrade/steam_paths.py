@@ -115,8 +115,9 @@ def restore_acf_writable(acf_path: Path, prior_mode: int) -> None:
         acf_path.chmod(prior_mode)
 
 
-def find_userdata_localconfig() -> Path | None:
-    """Find the current Steam user's localconfig.vdf (holds per-app update behavior)."""
+def find_userdata_localconfigs() -> list[Path]:
+    """Find every Steam user's localconfig.vdf."""
+    configs = []
     for steam_root in _steam_roots():
         userdata = steam_root / "userdata"
         if not userdata.is_dir():
@@ -124,5 +125,11 @@ def find_userdata_localconfig() -> Path | None:
         for user_dir in sorted(userdata.iterdir()):
             candidate = user_dir / "config" / "localconfig.vdf"
             if candidate.is_file():
-                return candidate
-    return None
+                configs.append(candidate)
+    return _dedupe(configs)
+
+
+def find_userdata_localconfig() -> Path | None:
+    """Compatibility helper returning the first Steam user config."""
+    configs = find_userdata_localconfigs()
+    return configs[0] if configs else None

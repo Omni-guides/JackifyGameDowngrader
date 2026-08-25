@@ -1,11 +1,4 @@
-"""Fetch and drive Valve's headless steamcmd to pull pinned depot manifests.
-
-The Steam client's own developer console (steam -console) can run
-download_depot too, but it is a GUI text box with no scriptable stdin.
-steamcmd is the real automatable path: it is a plain CLI, accepts
-+login/+download_depot/+quit, and prompts for password / Steam Guard over
-stdin/stdout like any interactive terminal program.
-"""
+"""Download pinned depot manifests through Valve's SteamCMD."""
 from __future__ import annotations
 
 import os
@@ -54,11 +47,7 @@ _SELF_UPDATE_RE = re.compile(r"^\[\s*\d+%\]|^\[-{2,}\]")
 _ERROR_REASON_RE = re.compile(r"ERROR[! ]*\(([^)]+)\)")
 _SPINNER = "|/-\\"
 
-# steamcmd's own bookkeeping/diagnostic chatter, never useful to a person
-# running a downgrade, so it's dropped rather than forwarded. Matched as a
-# substring, not a strict prefix: steamcmd sometimes glues several messages
-# onto one line with no newline between them (or precedes one with escape
-# codes), so the noise text doesn't always start at position 0.
+# Bookkeeping messages hidden from the user-facing output.
 _NOISE_SUBSTRINGS = (
     "steamcmd.sh[",
     "Redirecting stderr to ",
@@ -77,30 +66,11 @@ def _dir_size(path: Path) -> int:
 
 
 def _run_with_spinner(cmd: list[str], appid: int) -> tuple[int, str | None]:
-    """Run steamcmd with its output passed through line by line (dropping a
-    short list of known-noisy diagnostic lines, see _NOISE_SUBSTRINGS), with
-    an overlay filling any gap where steamcmd itself prints nothing. This is
-    most notably the depot transfer itself, which can take minutes on a
-    multi-GB depot with no percentage of its own (only its own self-update
-    gets one). steamcmd does tell us each depot's total size up front
-    though, so real progress is shown by polling how large its output
-    folder has actually grown against that total, not just a liveness
-    spinner. Each depot's elapsed time is reported once its completion line
-    arrives, replacing steamcmd's own more verbose one.
+    """Run SteamCMD in a PTY so login prompts remain interactive.
 
-    A line only gets forwarded once its trailing newline arrives, since only
-    then do we know whether it's noise. The exception is when nothing has
-    arrived for a while and something is still pending: that's an
-    interactive prompt steamcmd never terminates with a newline (e.g.
-    "password: "), so it's flushed immediately rather than held forever
-    waiting for one.
-
-    steamcmd is run attached to a pty, not a plain pipe: like most CLI tools
-    built on C stdio, it only flushes output immediately when it thinks it's
-    talking to a real terminal, otherwise it buffers in large chunks. That
-    would otherwise silently break both the spinner and the per-depot
-    timing, since everything would arrive in one delayed burst instead of
-    as it happens.
+    Complete lines are filtered for diagnostic noise. Unterminated prompts
+    are forwarded during quiet periods, and depot progress is estimated from
+    the files SteamCMD writes on disk.
     """
     controller_fd, worker_fd = pty.openpty()
     proc = subprocess.Popen(cmd, stdout=worker_fd, stderr=worker_fd, close_fds=True)
@@ -147,10 +117,12 @@ def _run_with_spinner(cmd: list[str], appid: int) -> tuple[int, str | None]:
                         last_poll = now
                         depot_dir = STEAMCMD_DIR / "linux32" / "steamapps" / "content" / f"app_{appid}" / f"depot_{depot_id}"
                         last_done_mb = _dir_size(depot_dir) / 1_000_000
-                    pct = min(100, last_done_mb / total_mb * 100) if total_mb else 0
+                    shown_mb = min(last_done_mb, total_mb)
+                    pct = shown_mb / total_mb * 100 if total_mb else 0
+                    suffix = ", finalising" if last_done_mb >= total_mb else ""
                     write_overlay(
                         f"  {_SPINNER[frame % len(_SPINNER)]} depot {depot_id}: "
-                        f"{pct:.0f}% ({last_done_mb:.0f}/{total_mb} MB)"
+                        f"{pct:.0f}% ({shown_mb:.0f}/{total_mb} MB{suffix})"
                     )
                 continue
 
@@ -197,8 +169,7 @@ def _run_with_spinner(cmd: list[str], appid: int) -> tuple[int, str | None]:
         clear_overlay()
         return proc.wait(), error_reason
     except BaseException:
-        # Covers Ctrl+C too. Make sure steamcmd doesn't keep running
-        # in the background if we bail out of the loop above.
+        # Do not leave SteamCMD running after an interruption.
         proc.terminate()
         proc.wait()
         raise
@@ -215,7 +186,8 @@ def download_depots(username: str, appid: int, manifests: dict[str, str]) -> Pat
     """
     print("Note: steamcmd itself reports no progress for the depot download (just a")
     print("start/complete line per depot). The percentage shown below is this tool")
-    print("tracking the downloaded files' size on disk, not steamcmd's own report.")
+    print("estimating from files written on disk. It may show 'finalising' while")
+    print("steamcmd finishes expanding and checking the depot.")
     print("If your account uses Steam Guard's mobile authenticator, check your phone")
     print("for an approval prompt after entering your password. steamcmd waits")
     print("silently for it.", flush=True)
@@ -236,8 +208,7 @@ def download_depots(username: str, appid: int, manifests: dict[str, str]) -> Pat
         raise RuntimeError(
             f"steamcmd exited with code {returncode}. "
             "Check the output above; a common cause is a stale/pruned "
-            "manifest ID (see README for how to refresh the game's JSON file "
-            "under game_downgrade/games/)."
+            "manifest ID (see README for how to refresh the JSON file under games/)."
         )
 
     # download_depot ignores force_install_dir. It always lands relative to

@@ -44,6 +44,18 @@ def backup_path_for(game_path: Path, prior_version: str | None, prior_buildid: s
     return candidate
 
 
+def reset_game_from_backup(game_path: Path, backup_path: Path) -> None:
+    if not backup_path.is_dir():
+        raise RuntimeError(f"Backup not found at {backup_path}.")
+    shutil.rmtree(game_path)
+    try:
+        shutil.copytree(backup_path, game_path)
+    except BaseException:
+        raise RuntimeError(
+            f"Reset failed. The original backup remains intact at {backup_path}."
+        )
+
+
 def apply_downgrade(
     game_path: Path,
     content_dir: Path,
@@ -54,32 +66,49 @@ def apply_downgrade(
     prior_update_behavior: str | None = None,
     acf_path: Path | None = None,
     prior_acf_mode: int | None = None,
-) -> Path:
+    create_backup: bool = True,
+    existing_state: dict | None = None,
+    localconfigs: list[dict] | None = None,
+) -> Path | None:
     """Copy the whole game folder to a sibling backup, then copy every file
     under content_dir's depot_* trees over game_path. Returns the backup path.
     """
-    backup_path = backup_path_for(game_path, prior_version, prior_buildid)
-    shutil.copytree(game_path, backup_path)
+    if existing_state is not None:
+        state = dict(existing_state)
+        backup_path = Path(state["backup_path"]) if state.get("backup_path") else None
+        state["version"] = version
+        state["timestamp"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    else:
+        backup_path = backup_path_for(game_path, prior_version, prior_buildid) if create_backup else None
+        if backup_path is not None:
+            shutil.copytree(game_path, backup_path)
+        state = {
+            "game_path": str(game_path),
+            "backup_path": str(backup_path) if backup_path else None,
+            "version": version,
+            "prior_version": prior_version,
+            "prior_buildid": prior_buildid,
+            "prior_update_behavior": prior_update_behavior,
+            "acf_path": str(acf_path) if acf_path else None,
+            "prior_acf_mode": prior_acf_mode,
+            "localconfigs": localconfigs or [],
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    data_dir.mkdir(parents=True, exist_ok=True)
+    _state_path(data_dir).write_text(json.dumps(state, indent=2))
 
     for src, rel in _content_files(content_dir):
         dest = game_path / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dest)
 
-    state = {
-        "game_path": str(game_path),
-        "backup_path": str(backup_path),
-        "version": version,
-        "prior_version": prior_version,
-        "prior_buildid": prior_buildid,
-        "prior_update_behavior": prior_update_behavior,
-        "acf_path": str(acf_path) if acf_path else None,
-        "prior_acf_mode": prior_acf_mode,
-        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-    }
-    data_dir.mkdir(parents=True, exist_ok=True)
-    _state_path(data_dir).write_text(json.dumps(state, indent=2))
     return backup_path
+
+
+def clear_state(data_dir: Path) -> None:
+    path = _state_path(data_dir)
+    if path.is_file():
+        path.unlink()
 
 
 def _state_path(data_dir: Path) -> Path:

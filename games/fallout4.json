@@ -2,6 +2,8 @@
   "name": "Fallout 4",
   "appid": 377160,
   "main_exe": "Fallout4.exe",
+  "localappdata_dir": "Fallout4",
+  "download_size_gb": 40,
   "depots": [377161, 377162, 377163],
   "versions": {
     "1.10.163": {
