@@ -1,4 +1,3 @@
-"""Download pinned depot manifests through Valve's SteamCMD."""
 from __future__ import annotations
 
 import os
@@ -47,7 +46,6 @@ _SELF_UPDATE_RE = re.compile(r"^\[\s*\d+%\]|^\[-{2,}\]")
 _ERROR_REASON_RE = re.compile(r"ERROR[! ]*\(([^)]+)\)")
 _SPINNER = "|/-\\"
 
-# Bookkeeping messages hidden from the user-facing output.
 _NOISE_SUBSTRINGS = (
     "steamcmd.sh[",
     "Redirecting stderr to ",
@@ -66,20 +64,14 @@ def _dir_size(path: Path) -> int:
 
 
 def _run_with_spinner(cmd: list[str], appid: int) -> tuple[int, str | None]:
-    """Run SteamCMD in a PTY so login prompts remain interactive.
-
-    Complete lines are filtered for diagnostic noise. Unterminated prompts
-    are forwarded during quiet periods, and depot progress is estimated from
-    the files SteamCMD writes on disk.
-    """
     controller_fd, worker_fd = pty.openpty()
     proc = subprocess.Popen(cmd, stdout=worker_fd, stderr=worker_fd, close_fds=True)
     os.close(worker_fd)
 
-    pending = b""  # bytes received since the last completed/flushed line
-    depot: tuple[str, float, int] | None = None  # (depot id, start time, total MB) while mid-transfer
+    pending = b""
+    depot: tuple[str, float, int] | None = None
     frame = 0
-    overlay_shown = False  # true while the terminal's last write was a spinner/status overlay
+    overlay_shown = False
     last_poll = 0.0
     last_done_mb = 0.0
     error_reason: str | None = None
@@ -144,17 +136,14 @@ def _run_with_spinner(cmd: list[str], appid: int) -> tuple[int, str | None]:
                 error_reason = reason.group(1)
 
             if _SELF_UPDATE_RE.match(stripped):
-                # steamcmd's own (first-run, or occasional) self-update: dozens
-                # of individual percentage/status lines with no real value
-                # beyond "still working", collapsed to one overwritten line.
                 write_overlay(f"  updating steamcmd... {stripped}")
                 continue
 
             start = _DEPOT_START_RE.search(text)
             if start:
-                print()  # separate this depot's block from whatever came before
+                print()
                 depot = (start.group(1), time.monotonic(), int(start.group(2).replace(",", "")))
-                last_poll, last_done_mb = 0.0, 0.0  # force a fresh poll for this depot
+                last_poll, last_done_mb = 0.0, 0.0
             elif _DEPOT_DONE_RE.search(text) and depot:
                 clear_overlay()
                 print(f"  (depot {depot[0]} took {time.monotonic() - depot[1]:.0f}s)")
@@ -169,7 +158,6 @@ def _run_with_spinner(cmd: list[str], appid: int) -> tuple[int, str | None]:
         clear_overlay()
         return proc.wait(), error_reason
     except BaseException:
-        # Do not leave SteamCMD running after an interruption.
         proc.terminate()
         proc.wait()
         raise
@@ -178,12 +166,6 @@ def _run_with_spinner(cmd: list[str], appid: int) -> tuple[int, str | None]:
 
 
 def download_depots(username: str, appid: int, manifests: dict[str, str]) -> Path:
-    """Run steamcmd to pull each depot's pinned manifest.
-
-    Login and any Steam Guard prompt are interactive (stdin is left connected
-    to the terminal) since this is meant to run in a foreground terminal
-    session, not headless/unattended.
-    """
     print("Note: steamcmd itself reports no progress for the depot download (just a")
     print("start/complete line per depot). The percentage shown below is this tool")
     print("estimating from files written on disk. It may show 'finalising' while")
@@ -192,14 +174,14 @@ def download_depots(username: str, appid: int, manifests: dict[str, str]) -> Pat
     print("for an approval prompt after entering your password. steamcmd waits")
     print("silently for it.", flush=True)
 
-    steamcmd_bin = ensure_steamcmd()  # may print a one-time download notice here
+    steamcmd_bin = ensure_steamcmd()
 
     cmd = [str(steamcmd_bin), "+login", username]
     for depotid, manifestid in manifests.items():
         cmd += ["+download_depot", str(appid), str(depotid), str(manifestid)]
     cmd.append("+quit")
 
-    print()  # steamcmd's own output starts right after this
+    print()
     returncode, error_reason = _run_with_spinner(cmd, appid)
 
     if returncode != 0:
@@ -211,9 +193,6 @@ def download_depots(username: str, appid: int, manifests: dict[str, str]) -> Pat
             "manifest ID (see README for how to refresh the JSON file under games/)."
         )
 
-    # download_depot ignores force_install_dir. It always lands relative to
-    # steamcmd's own install, in a location its own docs don't fix, so it's
-    # located by searching rather than assumed.
     app_dirs = list(STEAMCMD_DIR.rglob(f"app_{appid}"))
     if not app_dirs:
         raise RuntimeError(f"Could not find steamcmd's depot output (app_{appid}) under {STEAMCMD_DIR}.")

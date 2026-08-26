@@ -4,12 +4,11 @@ import argparse
 import json
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
-from . import steam_paths, steamcmd, swap, updatelock
+from . import steam_lifecycle, steam_paths, steamcmd, swap, updatelock
 
 
 def _newest_versions_first(versions):
@@ -34,12 +33,6 @@ def load_game(game_key: str) -> dict:
 
 
 def _resolve_game(args: argparse.Namespace) -> tuple[str, dict]:
-    """Return (game_key, game_data) for --game, or ask if it wasn't given.
-
-    There is deliberately no default game: picking the wrong one here means
-    downgrading the wrong install, so it's always either explicit on the
-    command line or an explicit interactive choice, never silent.
-    """
     if args.game:
         return args.game, load_game(args.game)
     keys = available_games()
@@ -56,14 +49,6 @@ def _resolve_game(args: argparse.Namespace) -> tuple[str, dict]:
             return key, load_game(key)
         except (ValueError, IndexError):
             print(f"Enter a number from 1 to {len(keys)}.")
-
-
-def _process_running(name: str) -> bool:
-    try:
-        result = subprocess.run(["pgrep", "-x", name], stdout=subprocess.DEVNULL)
-        return result.returncode == 0
-    except FileNotFoundError:
-        return False  # pgrep unavailable, so don't block the user
 
 
 def _confirm(prompt: str) -> bool:
@@ -114,32 +99,6 @@ def _test_file_write(path: Path) -> None:
         raise RuntimeError(f"No write access to {path}.") from exc
 
 
-def _press_any_key(prompt: str) -> None:
-    print(prompt, end="", flush=True)
-    if not sys.stdin.isatty():
-        input()  # not a real terminal (e.g. piped input), so fall back to Enter
-        return
-    import termios
-    import tty
-
-    fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
-    try:
-        tty.setcbreak(fd)  # single keypress, no Enter needed, and keeps Ctrl+C (ISIG) working
-        sys.stdin.read(1)
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
-    print()
-
-
-def _require_closed(name: str, label: str) -> None:
-    while _process_running(name):
-        _press_any_key(
-            f"The downgrader requires {label} to be closed. "
-            f"Please fully exit {label} and then press any key to continue... "
-        )
-
-
 def cmd_list_games(_args: argparse.Namespace) -> int:
     print("Supported games:")
     for key in available_games():
@@ -156,12 +115,33 @@ def cmd_list_versions(args: argparse.Namespace) -> int:
     return 0
 
 
+def _accept_steam_warning() -> bool:
+    print()
+    print("Steam will close before game files are changed and will restart when finished.")
+    print("Any game currently running through Steam will also be closed.")
+    return _confirm("Continue?")
+
+
+def _restart_steam(session: steam_lifecycle.Session) -> None:
+    if not session.running:
+        return
+    print("Starting Steam...")
+    if steam_lifecycle.start(session):
+        print("Steam started.")
+    else:
+        print("Steam could not be restarted automatically. Please start it manually.")
+
+
 def cmd_restore(args: argparse.Namespace) -> int:
     game_key, game = _resolve_game(args)
     data_dir = game_data_dir(game_key)
     state = swap.load_state(data_dir)
     if state is None:
         print(f"No downgrade state found for {game['name']}; nothing to restore.")
+        return 1
+    managed_restart = getattr(args, "managed_restart", False)
+    if not managed_restart and not _accept_steam_warning():
+        print("Aborted.")
         return 1
 
     _section(f"Restore: {game['name']}")
@@ -174,40 +154,50 @@ def cmd_restore(args: argparse.Namespace) -> int:
         print("Aborted.")
         return 1
 
-    if state.get("backup_path"):
-        swap.restore_from_state(data_dir)
-
-    config_states = state.get("localconfigs", [])
-    if config_states:
-        for config_state in config_states:
-            localconfig = Path(config_state["path"])
-            if localconfig.is_file():
-                updatelock.revert_update_behavior(
-                    localconfig, game["appid"], config_state.get("prior_value")
-                )
-                print(f"Reverted Steam update setting in {localconfig}.")
-    else:
-        localconfig = steam_paths.find_userdata_localconfig()
-        if localconfig is not None and "prior_update_behavior" in state:
-            updatelock.revert_update_behavior(localconfig, game["appid"], state["prior_update_behavior"])
-            print(f"Reverted {game['name']}'s auto-update setting back to what it was before.")
-
-    if state.get("acf_path") and state.get("prior_acf_mode") is not None:
-        acf_path = Path(state["acf_path"])
-        steam_paths.restore_acf_writable(acf_path, state["prior_acf_mode"])
-        print(f"Restored write permissions on {acf_path.name}.")
-
     game_path = Path(state["game_path"])
-    content_catalog = steam_paths.find_content_catalog(
-        game_path.parents[2], game["appid"], game_path.name
-    )
-    if content_catalog.is_file():
-        content_catalog.unlink()
-        print("Removed stale Creation Club content catalog (ContentCatalog.txt);")
-        print("Steam regenerates it on next launch.")
+    steam_root = game_path.parents[2]
+    steam_session = None
+    if not managed_restart:
+        print("Stopping Steam...")
+        steam_session = steam_lifecycle.stop(game["main_exe"])
 
-    if not state.get("backup_path"):
-        swap.clear_state(data_dir)
+    try:
+        if state.get("backup_path"):
+            swap.restore_from_state(data_dir)
+
+        config_states = state.get("localconfigs", [])
+        if config_states:
+            for config_state in config_states:
+                localconfig = Path(config_state["path"])
+                if localconfig.is_file():
+                    updatelock.revert_update_behavior(
+                        localconfig, game["appid"], config_state.get("prior_value")
+                    )
+                    print(f"Reverted Steam update setting in {localconfig}.")
+        else:
+            localconfig = steam_paths.find_userdata_localconfig()
+            if localconfig is not None and "prior_update_behavior" in state:
+                updatelock.revert_update_behavior(localconfig, game["appid"], state["prior_update_behavior"])
+                print(f"Reverted {game['name']}'s auto-update setting back to what it was before.")
+
+        if state.get("acf_path") and state.get("prior_acf_mode") is not None:
+            acf_path = Path(state["acf_path"])
+            steam_paths.restore_acf_writable(acf_path, state["prior_acf_mode"])
+            print(f"Restored write permissions on {acf_path.name}.")
+
+        content_catalog = steam_paths.find_content_catalog(
+            steam_root, game["appid"], game_path.name
+        )
+        if content_catalog.is_file():
+            content_catalog.unlink()
+            print("Removed stale Creation Club content catalog (ContentCatalog.txt);")
+            print("Steam regenerates it on next launch.")
+
+        if not state.get("backup_path"):
+            swap.clear_state(data_dir)
+    finally:
+        if steam_session is not None:
+            _restart_steam(steam_session)
 
     print()
     if state.get("backup_path"):
@@ -220,14 +210,16 @@ def cmd_restore(args: argparse.Namespace) -> int:
 
 
 def cmd_downgrade(args: argparse.Namespace) -> int:
-    _require_closed("steam", "Steam")
     game_key, game = _resolve_game(args)
-    _require_closed(game["main_exe"], game["name"])
 
     install = steam_paths.find_game(game["appid"], game["main_exe"])
     if install is None:
         print(f"Could not find a {game['name']} install via Steam's library files.")
         print("Make sure it's installed through Steam (not GOG/Epic; this tool is Steam-only).")
+        return 1
+    managed_restart = getattr(args, "managed_restart", False)
+    if not args.dry_run and not managed_restart and not _accept_steam_warning():
+        print("Aborted.")
         return 1
 
     versions = game["versions"]
@@ -314,7 +306,6 @@ def cmd_downgrade(args: argparse.Namespace) -> int:
     if not _confirm("Proceed?"):
         print("Aborted.")
         return 1
-
     data_dir.parent.mkdir(parents=True, exist_ok=True)
     _test_directory_write(data_dir.parent)
     if not args.dry_run:
@@ -348,69 +339,77 @@ def cmd_downgrade(args: argparse.Namespace) -> int:
         print("DRY RUN complete. No game files or Steam settings were changed.")
         return 0
 
-    if retarget:
-        localconfigs = steam_paths.find_userdata_localconfigs()
-        prior_update_behavior = existing_state.get("prior_update_behavior")
-        prior_acf_mode = existing_state.get("prior_acf_mode")
-        localconfig_states = existing_state.get("localconfigs", [])
-    else:
-        localconfigs = steam_paths.find_userdata_localconfigs()
-        prior_update_behavior = None
-        localconfig_states = []
-        for localconfig in localconfigs:
-            prior = updatelock.set_manual_update(localconfig, game["appid"])
-            localconfig_states.append({"path": str(localconfig), "prior_value": prior})
-            if prior_update_behavior is None:
-                prior_update_behavior = prior
-            print(f"Protected Steam account config: {localconfig}")
-        if not localconfigs:
-            print(f"Could not find localconfig.vdf. Set {game['name']}'s Automatic Updates")
-            print("to 'Only update this game when I launch it' manually in Steam's")
-            print("game Properties, or it may silently re-update on next launch.")
-        prior_acf_mode = steam_paths.set_acf_readonly(install.acf_path)
+    steam_session = None
+    if not managed_restart:
+        print("Stopping Steam...")
+        steam_session = steam_lifecycle.stop(game["main_exe"])
 
-    _section("Applying downgrade")
-    if retarget and existing_state.get("backup_path") and Path(existing_state["backup_path"]).is_dir():
-        print("Resetting the game from the original backup...")
-        swap.reset_game_from_backup(install.game_path, Path(existing_state["backup_path"]))
-    elif create_backup:
-        print("Backing up the current install and copying downgraded files in...")
-    else:
-        print("Copying downgraded files in without a full backup...")
-    backup_path = swap.apply_downgrade(
-        install.game_path, content_dir, version_key, install.version, install.buildid, data_dir,
-        prior_update_behavior, install.acf_path, prior_acf_mode,
-        create_backup=create_backup,
-        existing_state=existing_state,
-        localconfigs=localconfig_states,
-    )
-    if backup_path is not None:
-        print(f"Backup saved to {backup_path}")
-    if localconfigs:
-        print(f"Set {game['name']} to 'only update when launched' in Steam.")
-    print(f"Set {install.acf_path.name} to read-only so Steam can't rewrite it back.")
+    try:
+        if retarget:
+            localconfigs = steam_paths.find_userdata_localconfigs()
+            prior_update_behavior = existing_state.get("prior_update_behavior")
+            prior_acf_mode = existing_state.get("prior_acf_mode")
+            localconfig_states = existing_state.get("localconfigs", [])
+        else:
+            localconfigs = steam_paths.find_userdata_localconfigs()
+            prior_update_behavior = None
+            localconfig_states = []
+            for localconfig in localconfigs:
+                prior = updatelock.set_manual_update(localconfig, game["appid"])
+                localconfig_states.append({"path": str(localconfig), "prior_value": prior})
+                if prior_update_behavior is None:
+                    prior_update_behavior = prior
+                print(f"Protected Steam account config: {localconfig}")
+            if not localconfigs:
+                print(f"Could not find localconfig.vdf. Set {game['name']}'s Automatic Updates")
+                print("to 'Only update this game when I launch it' manually in Steam's")
+                print("game Properties, or it may silently re-update on next launch.")
+            prior_acf_mode = steam_paths.set_acf_readonly(install.acf_path)
 
-    installed_version = read_file_version(install.game_path / game["main_exe"])
-    if installed_version is None or not installed_version.startswith(version_key):
-        raise RuntimeError(
-            f"Expected {version_key}, but the installed executable reports "
-            f"{installed_version or 'an unknown version'}. The backup is intact."
+        _section("Applying downgrade")
+        if retarget and existing_state.get("backup_path") and Path(existing_state["backup_path"]).is_dir():
+            print("Resetting the game from the original backup...")
+            swap.reset_game_from_backup(install.game_path, Path(existing_state["backup_path"]))
+        elif create_backup:
+            print("Backing up the current install and copying downgraded files in...")
+        else:
+            print("Copying downgraded files in without a full backup...")
+        backup_path = swap.apply_downgrade(
+            install.game_path, content_dir, version_key, install.version, install.buildid, data_dir,
+            prior_update_behavior, install.acf_path, prior_acf_mode,
+            create_backup=create_backup,
+            existing_state=existing_state,
+            localconfigs=localconfig_states,
         )
+        if backup_path is not None:
+            print(f"Backup saved to {backup_path}")
+        if localconfigs:
+            print(f"Set {game['name']} to 'only update when launched' in Steam.")
+        print(f"Set {install.acf_path.name} to read-only so Steam can't rewrite it back.")
 
-    shutil.rmtree(content_dir, ignore_errors=True)
+        installed_version = read_file_version(install.game_path / game["main_exe"])
+        if installed_version is None or not installed_version.startswith(version_key):
+            raise RuntimeError(
+                f"Expected {version_key}, but the installed executable reports "
+                f"{installed_version or 'an unknown version'}. The backup is intact."
+            )
 
-    content_catalog = steam_paths.find_content_catalog(
-        install.library_root, game["appid"], install.game_path.name
-    )
-    if content_catalog.is_file():
-        content_catalog.unlink()
-        print("Removed stale Creation Club content catalog (ContentCatalog.txt);")
-        print("Steam regenerates it on next launch.")
+        shutil.rmtree(content_dir, ignore_errors=True)
+
+        content_catalog = steam_paths.find_content_catalog(
+            install.library_root, game["appid"], install.game_path.name
+        )
+        if content_catalog.is_file():
+            content_catalog.unlink()
+            print("Removed stale Creation Club content catalog (ContentCatalog.txt);")
+            print("Steam regenerates it on next launch.")
+    finally:
+        if steam_session is not None:
+            _restart_steam(steam_session)
 
     _section("Done")
     print(f"{game['name']} is now on {version_key}.")
-    print("Before playing: launch Steam, and either use Offline Mode or avoid")
-    print("clicking Update if Steam prompts for one.")
+    print("Use Offline Mode or avoid clicking Update if Steam prompts for one.")
     return 0
 
 
@@ -479,6 +478,10 @@ def main(argv: list[str] | None = None) -> int:
 
     p_restore = sub.add_parser("restore", help="Undo the last downgrade for a game")
     _add_game_arg(p_restore)
+    p_restore.add_argument(
+        "--managed-restart", action="store_true",
+        help="Leave Steam and game process management to the calling application",
+    )
     p_restore.set_defaults(func=cmd_restore)
 
     p_downgrade = sub.add_parser("downgrade", help="Downgrade a game (default if no command given)")
@@ -491,6 +494,10 @@ def main(argv: list[str] | None = None) -> int:
     p_downgrade.add_argument(
         "--no-backup", action="store_true",
         help="Skip the optional full game backup",
+    )
+    p_downgrade.add_argument(
+        "--managed-restart", action="store_true",
+        help="Leave Steam and game process management to the calling application",
     )
     p_downgrade.set_defaults(func=cmd_downgrade)
 

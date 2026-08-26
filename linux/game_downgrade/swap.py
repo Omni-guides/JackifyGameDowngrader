@@ -1,7 +1,3 @@
-"""Back up the whole game install as a sibling folder, copy staged depot
-content over the real one, and record enough to undo it with the restore
-command.
-"""
 from __future__ import annotations
 
 import json
@@ -11,7 +7,6 @@ from pathlib import Path
 
 
 def _content_files(content_dir: Path):
-    """Yield (src, rel_path) for every file under content_dir's depot_* trees."""
     for depot_dir in sorted(content_dir.iterdir()):
         if not depot_dir.is_dir():
             continue
@@ -20,7 +15,6 @@ def _content_files(content_dir: Path):
 
 
 def preview_downgrade(game_path: Path, content_dir: Path) -> tuple[list[str], list[str]]:
-    """Report what apply_downgrade would overwrite/add, without changing anything."""
     overwrite, new = [], []
     for _src, rel in _content_files(content_dir):
         (overwrite if (game_path / rel).is_file() else new).append(str(rel))
@@ -28,13 +22,6 @@ def preview_downgrade(game_path: Path, content_dir: Path) -> tuple[list[str], li
 
 
 def backup_path_for(game_path: Path, prior_version: str | None, prior_buildid: str | None) -> Path:
-    """Where apply_downgrade would put the full pre-downgrade copy.
-
-    Named by the game's own version (e.g. "1.7.99.0") when it could be read
-    from the exe, since that's what people actually mean by a version.
-    Steam's internal build id is used here only as a fallback, if reading
-    the exe's version failed.
-    """
     label = prior_version or (f"build {prior_buildid}" if prior_buildid else "backup")
     candidate = game_path.parent / f"{game_path.name} ({label})"
     n = 2
@@ -70,9 +57,6 @@ def apply_downgrade(
     existing_state: dict | None = None,
     localconfigs: list[dict] | None = None,
 ) -> Path | None:
-    """Copy the whole game folder to a sibling backup, then copy every file
-    under content_dir's depot_* trees over game_path. Returns the backup path.
-    """
     if existing_state is not None:
         state = dict(existing_state)
         backup_path = Path(state["backup_path"]) if state.get("backup_path") else None

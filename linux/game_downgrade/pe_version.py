@@ -1,13 +1,3 @@
-"""Read the FileVersion string (e.g. "1.7.99.0") out of a Windows PE exe's
-VERSIONINFO resource. This is the version people actually mean when they
-say "1.7.99" or "1.6.1170", unlike Steam's internal buildid, which has no
-fixed relationship to it and has to be looked up externally to mean
-anything.
-
-No PE library dependency: this walks just enough of the PE/resource format
-by hand. Returns None (never raises) if anything looks unexpected, so
-callers can fall back to the buildid.
-"""
 from __future__ import annotations
 
 import struct
@@ -64,10 +54,7 @@ def _read_file_version(data: bytes) -> str | None:
     if resource_base is None:
         return None
 
-    # Resource tree is Type -> Name -> Language; RT_VERSION is a fixed type
-    # id, and real exes only ever have one name/language for it, so just
-    # walk down: find RT_VERSION at the root, then take the first entry at
-    # each level below.
+    # Follow RT_VERSION through its name and language directories.
     version_entry = next(
         (offset for type_id, offset in _resource_dir_entries(data, resource_base) if type_id == _RT_VERSION),
         None,
@@ -86,8 +73,7 @@ def _read_file_version(data: bytes) -> str | None:
     if version_info is None:
         return None
 
-    # VS_VERSIONINFO: wLength, wValueLength, wType, then the null-terminated
-    # UTF-16LE key, then padding to a 4-byte boundary, then VS_FIXEDFILEINFO.
+    # Skip the VS_VERSIONINFO header and padded UTF-16LE key.
     key_start = version_info + 6
     if data[key_start : key_start + len(_VS_VERSION_KEY)] != _VS_VERSION_KEY:
         return None

@@ -24,7 +24,6 @@ You will need:
 
 - The Steam edition of the game, not GOG, Epic, or Game Pass.
 - A Steam account that owns the game.
-- Steam and the game to be closed. If either is still running, the tool asks you to close it before continuing.
 - Enough free space for the depot download (around 20 GB for Skyrim).
 - More free space if you choose the optional full backup. The tool shows its approximate size before starting.
 - Windows 10 or 11, or Python 3.10 or newer on Linux.
@@ -45,6 +44,14 @@ What would you like to do?
   2) Downgrade Skyrim Special Edition
   3) Restore a previous downgrade
 Pick an option [number]: 2
+```
+
+The tool warns that Steam will be closed later in the process. This also closes any game currently running through Steam:
+
+```text
+Steam will close before game files are changed and will restart when finished.
+Any game currently running through Steam will also be closed.
+Continue? [y/N]: y
 ```
 
 Choose `1.6.1170` by entering `1`:
@@ -128,13 +135,16 @@ The Windows percentage is an estimate because SteamCMD writes some large files i
 
 ### 5. Let the tool apply the downgrade
 
-After every requested depot is confirmed, the tool makes the optional backup, applies the downloaded files, adjusts the Steam settings, and checks the installed game version:
+After the downloads finish, the tool closes Steam, makes the optional backup, applies the downloaded files, adjusts the Steam settings, checks the installed game version, and starts Steam again:
 
 ```text
+Stopping Steam...
 Creating full backup...
 Protected Steam account config: C:\Program Files (x86)\Steam\userdata\...\localconfig.vdf
 Installing depot files...
 Removed stale Creation Club content catalog: C:\Users\...\AppData\Local\Skyrim Special Edition\ContentCatalog.txt
+Starting Steam...
+Steam started.
 Downgrade complete: 1.6.1170.0
 Backup retained at D:\SteamLibrary\steamapps\common\Skyrim Special Edition (1.7.99.0)
 ```
@@ -165,6 +175,14 @@ What would you like to do?
   2) Downgrade Skyrim Special Edition
   3) Restore a previous downgrade
 Pick an option [number]: 2
+```
+
+The tool warns that Steam will be closed later in the process. This also closes any game currently running through Steam:
+
+```text
+Steam will close before game files are changed and will restart when finished.
+Any game currently running through Steam will also be closed.
+Continue? [y/N]: y
 ```
 
 The tool locates the game and lists the newest downgrade target first. Enter `1` for `1.6.1170`:
@@ -232,6 +250,8 @@ The percentage is estimated from the files SteamCMD writes to disk. It may show 
 ### 5. Let the tool apply the downgrade
 
 ```text
+Stopping Steam...
+
 == Applying downgrade ==
 Backing up the current install and copying downgraded files in...
 Backup saved to /home/user/.local/share/Steam/steamapps/common/Skyrim Special Edition (1.7.99.0)
@@ -239,11 +259,12 @@ Set Skyrim Special Edition to 'only update when launched' in Steam.
 Set appmanifest_489830.acf to read-only so Steam can't rewrite it back.
 Removed stale Creation Club content catalog (ContentCatalog.txt);
 Steam regenerates it on next launch.
+Starting Steam...
+Steam started.
 
 == Done ==
 Skyrim Special Edition is now on 1.6.1170.
-Before playing: launch Steam, and either use Offline Mode or avoid
-clicking Update if Steam prompts for one.
+Use Offline Mode or avoid clicking Update if Steam prompts for one.
 ```
 
 ## Restoring or changing version
@@ -270,6 +291,7 @@ Windows PowerShell:
 .\JackifyGameDowngrader.ps1 -ListGames
 .\JackifyGameDowngrader.ps1 -Game skyrim_se -ListVersions
 .\JackifyGameDowngrader.ps1 -Game fallout4 -Restore
+.\JackifyGameDowngrader.ps1 -Game fallout4 --managed-restart
 ```
 
 Linux:
@@ -282,9 +304,12 @@ Linux:
 ./jackify-game-downgrader list-games
 ./jackify-game-downgrader list-versions --game skyrim_se
 ./jackify-game-downgrader restore --game fallout4
+./jackify-game-downgrader --game fallout4 --managed-restart
 ```
 
 Dry run downloads and checks the real depot data but does not modify the game, Steam settings, app manifest, or content catalog.
+
+`--managed-restart` is for launchers such as Jackify that close and restart Steam themselves. Most users do not need it.
 
 ## Supported versions
 
@@ -296,6 +321,7 @@ Dry run downloads and checks the real depot data but does not modify the game, S
 Before continuing, the tool shows the game path, backup choice, and required disk space. It then:
 
 - Downloads the selected depots through SteamCMD.
+- Closes Steam before changing any files and starts it again afterward.
 - Optionally copies the complete current game folder to a version-labelled backup beside it.
 - Installs the selected depot files.
 - Sets Steam to update the game only when launched.
@@ -316,7 +342,7 @@ Depot downloads are removed after success and retained after failure so the oper
 Build local release files in the workspace-level `../dist/` directory:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-release.ps1 -Version 0.2.0
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-release.ps1 -Version 0.2.2
 ```
 
 ## License

@@ -5,6 +5,8 @@ param(
     [switch]$Restore,
     [switch]$DryRun,
     [switch]$NoBackup,
+    [Alias('managed-restart')]
+    [switch]$ManagedRestart,
     [switch]$ListGames,
     [switch]$ListVersions
 )
@@ -218,10 +220,49 @@ function Set-VdfUpdateBehavior([string]$Path, [string]$AppId, [AllowNull()][stri
     return [pscustomobject]@{ Path = $Path; PriorPresent = $priorPresent; PriorValue = $prior }
 }
 
-function Wait-ForProcessExit([string]$Name, [string]$Label) {
-    while (Get-Process -Name $Name -ErrorAction SilentlyContinue) {
-        [void](Read-Host "Close $Label, then press Enter to continue")
+function Confirm-SteamRestartWarning {
+    Write-Host ''
+    Write-Host 'Steam will close before game files are changed and will restart when finished.' -ForegroundColor Yellow
+    Write-Host 'Any game currently running through Steam will also be closed.' -ForegroundColor Yellow
+    return (Confirm-Action 'Continue?')
+}
+
+function Stop-SteamAndGame([string]$GameProcess) {
+    Write-Host 'Stopping Steam...'
+    $steam = Get-Process -Name steam -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($steam -and $steam.Path) {
+        [void](Start-Process -FilePath $steam.Path -ArgumentList '-shutdown' -PassThru)
+        $deadline = [DateTime]::UtcNow.AddSeconds(20)
+        while ((Get-Process -Name steam -ErrorAction SilentlyContinue) -and [DateTime]::UtcNow -lt $deadline) {
+            Start-Sleep -Milliseconds 500
+        }
     }
+    Get-Process -Name steam -ErrorAction SilentlyContinue | Stop-Process -Force
+    Get-Process -Name $GameProcess -ErrorAction SilentlyContinue | Stop-Process -Force
+    if (Get-Process -Name steam -ErrorAction SilentlyContinue) {
+        throw 'Steam could not be closed. Close it manually and try again.'
+    }
+}
+
+function Start-SteamAgain([string[]]$SteamRoots, [bool]$WasRunning) {
+    if (-not $WasRunning) { return }
+    if (Get-Process -Name steam -ErrorAction SilentlyContinue) { return }
+    $exe = $SteamRoots | ForEach-Object { Join-Path $_ 'steam.exe' } | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+    if (-not $exe) {
+        Write-Host 'Steam could not be restarted automatically. Please start it manually.' -ForegroundColor Yellow
+        return
+    }
+    Write-Host 'Starting Steam...'
+    try {
+        [void](Start-Process -FilePath $exe)
+        $deadline = [DateTime]::UtcNow.AddSeconds(60)
+        while (-not (Get-Process -Name steam -ErrorAction SilentlyContinue) -and [DateTime]::UtcNow -lt $deadline) {
+            Start-Sleep -Seconds 1
+        }
+        if (Get-Process -Name steam -ErrorAction SilentlyContinue) { Write-Host 'Steam started.' }
+        else { Write-Host 'Steam could not be restarted automatically. Please start it manually.' -ForegroundColor Yellow }
+    }
+    catch { Write-Host 'Steam could not be restarted automatically. Please start it manually.' -ForegroundColor Yellow }
 }
 
 function Test-DirectoryWrite([string]$Path) {
@@ -534,30 +575,41 @@ function Confirm-DefaultYes([string]$Prompt) {
 function Invoke-Restore([string]$GameKey, $Definition, [string[]]$SteamRoots) {
     $state = Load-State $GameKey
     if (-not $state) { throw "No downgrade state found for $($Definition.name)." }
+    if (-not $ManagedRestart -and -not (Confirm-SteamRestartWarning)) { Write-Host 'Aborted.'; return }
     Write-Host "Game folder: $($state.game_path)"
     if ($state.backup_path) { Write-Host "Backup:      $($state.backup_path)" }
     else { Write-Host 'Backup:      none; Steam verification will be required' }
     if (-not (Confirm-Action 'Restore this backup?')) { Write-Host 'Aborted.'; return }
-    Wait-ForProcessExit 'steam' 'Steam'
-    Wait-ForProcessExit ([IO.Path]::GetFileNameWithoutExtension($Definition.main_exe)) $Definition.name
+    $gameProcess = [IO.Path]::GetFileNameWithoutExtension($Definition.main_exe)
+    $steamWasRunning = $false
+    if (-not $ManagedRestart) {
+        $steamWasRunning = [bool](Get-Process -Name steam -ErrorAction SilentlyContinue)
+        try { Stop-SteamAndGame $gameProcess }
+        catch { Start-SteamAgain $SteamRoots $steamWasRunning; throw }
+    }
     $gamePath = [string]$state.game_path
     $backupPath = [string]$state.backup_path
-    if ($backupPath) {
-        if (-not (Test-Path -LiteralPath $backupPath -PathType Container)) { throw "Backup not found: $backupPath" }
-        $temporary = "$gamePath.jgd-restore-$([guid]::NewGuid().ToString('N'))"
-        [IO.Directory]::Move($gamePath, $temporary)
-        try { [IO.Directory]::Move($backupPath, $gamePath) }
-        catch { [IO.Directory]::Move($temporary, $gamePath); throw }
-        Remove-Item -LiteralPath $temporary -Recurse -Force
+    try {
+        if ($backupPath) {
+            if (-not (Test-Path -LiteralPath $backupPath -PathType Container)) { throw "Backup not found: $backupPath" }
+            $temporary = "$gamePath.jgd-restore-$([guid]::NewGuid().ToString('N'))"
+            [IO.Directory]::Move($gamePath, $temporary)
+            try { [IO.Directory]::Move($backupPath, $gamePath) }
+            catch { [IO.Directory]::Move($temporary, $gamePath); throw }
+            Remove-Item -LiteralPath $temporary -Recurse -Force
+        }
+        foreach ($config in @($state.localconfigs)) {
+            if (-not (Test-Path -LiteralPath $config.path -PathType Leaf)) { continue }
+            $value = if ([bool]$config.prior_present) { [string]$config.prior_value } else { $null }
+            [void](Set-VdfUpdateBehavior $config.path ([string]$Definition.appid) $value)
+        }
+        Restore-ManifestAttribute $state.acf_path ([bool]$state.acf_was_readonly)
+        Remove-ContentCatalog $Definition
+        Remove-Item -LiteralPath (Get-StatePath $GameKey) -Force
     }
-    foreach ($config in @($state.localconfigs)) {
-        if (-not (Test-Path -LiteralPath $config.path -PathType Leaf)) { continue }
-        $value = if ([bool]$config.prior_present) { [string]$config.prior_value } else { $null }
-        [void](Set-VdfUpdateBehavior $config.path ([string]$Definition.appid) $value)
+    finally {
+        if (-not $ManagedRestart) { Start-SteamAgain $SteamRoots $steamWasRunning }
     }
-    Restore-ManifestAttribute $state.acf_path ([bool]$state.acf_was_readonly)
-    Remove-ContentCatalog $Definition
-    Remove-Item -LiteralPath (Get-StatePath $GameKey) -Force
     if ($backupPath) { Write-Host 'Restore complete.' -ForegroundColor Green }
     else {
         Write-Host 'Steam settings restored. Use Steam Verify Integrity of Game Files to reinstall the current game build.' -ForegroundColor Green
@@ -565,13 +617,12 @@ function Invoke-Restore([string]$GameKey, $Definition, [string[]]$SteamRoots) {
 }
 
 function Invoke-Downgrade([string]$GameKey, $Definition, [string]$TargetVersion, [switch]$PreviewOnly, [switch]$NoBackup) {
-    Wait-ForProcessExit 'steam' 'Steam'
-    Wait-ForProcessExit ([IO.Path]::GetFileNameWithoutExtension($Definition.main_exe)) $Definition.name
     $steamRoots = @(Get-SteamRoots)
     if (-not $steamRoots) { throw 'Steam was not found.' }
     $libraries = @(Get-LibraryRoots $steamRoots)
     $install = Find-GameInstall $libraries $Definition
     if (-not $install) { throw "$($Definition.name) was not found in a Steam library." }
+    if (-not $PreviewOnly -and -not $ManagedRestart -and -not (Confirm-SteamRestartWarning)) { Write-Host 'Aborted.'; return }
     $existingState = Load-State $GameKey
     $retarget = ($null -ne $existingState)
     $target = Select-Version $Definition $TargetVersion
@@ -633,50 +684,62 @@ function Invoke-Downgrade([string]$GameKey, $Definition, [string]$TargetVersion,
         Remove-Item -LiteralPath $contentPath -Recurse -Force
         return
     }
-    if ($retarget -and $existingState.backup_path -and (Test-Path -LiteralPath $existingState.backup_path -PathType Container)) {
-        Write-Host 'Resetting the game from the original backup...'
-        Reset-GameFromBackup $install.GamePath $existingState.backup_path
+    $gameProcess = [IO.Path]::GetFileNameWithoutExtension($Definition.main_exe)
+    $steamWasRunning = $false
+    if (-not $ManagedRestart) {
+        $steamWasRunning = [bool](Get-Process -Name steam -ErrorAction SilentlyContinue)
+        try { Stop-SteamAndGame $gameProcess }
+        catch { Start-SteamAgain $steamRoots $steamWasRunning; throw }
     }
-    elseif ($createBackup) {
-        Write-Host 'Creating full backup...'
-        Copy-Tree $install.GamePath $backupPath
-    }
-    if ($retarget) {
-        $state = $existingState
-        $state.version = $target
-        $state.timestamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
-    }
-    else {
-        $configState = @()
-        foreach ($config in @(Get-LocalConfigs $steamRoots)) {
-            $result = Set-VdfUpdateBehavior $config ([string]$Definition.appid) '1'
-            if ($result) {
-                $configState += [pscustomobject]@{ path = $result.Path; prior_present = $result.PriorPresent; prior_value = $result.PriorValue }
-                Write-Host "Protected Steam account config: $config"
+    try {
+        if ($retarget -and $existingState.backup_path -and (Test-Path -LiteralPath $existingState.backup_path -PathType Container)) {
+            Write-Host 'Resetting the game from the original backup...'
+            Reset-GameFromBackup $install.GamePath $existingState.backup_path
+        }
+        elseif ($createBackup) {
+            Write-Host 'Creating full backup...'
+            Copy-Tree $install.GamePath $backupPath
+        }
+        if ($retarget) {
+            $state = $existingState
+            $state.version = $target
+            $state.timestamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+        }
+        else {
+            $configState = @()
+            foreach ($config in @(Get-LocalConfigs $steamRoots)) {
+                $result = Set-VdfUpdateBehavior $config ([string]$Definition.appid) '1'
+                if ($result) {
+                    $configState += [pscustomobject]@{ path = $result.Path; prior_present = $result.PriorPresent; prior_value = $result.PriorValue }
+                    Write-Host "Protected Steam account config: $config"
+                }
+            }
+            $acfWasReadOnly = Set-ManifestReadOnly $install.AcfPath
+            $state = [ordered]@{
+                game_path = $install.GamePath
+                backup_path = $(if ($createBackup) { $backupPath } else { $null })
+                version = $target
+                prior_version = $install.Version
+                prior_buildid = $install.BuildId
+                acf_path = $install.AcfPath
+                acf_was_readonly = $acfWasReadOnly
+                localconfigs = $configState
+                timestamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
             }
         }
-        $acfWasReadOnly = Set-ManifestReadOnly $install.AcfPath
-        $state = [ordered]@{
-            game_path = $install.GamePath
-            backup_path = $(if ($createBackup) { $backupPath } else { $null })
-            version = $target
-            prior_version = $install.Version
-            prior_buildid = $install.BuildId
-            acf_path = $install.AcfPath
-            acf_was_readonly = $acfWasReadOnly
-            localconfigs = $configState
-            timestamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+        Save-State $GameKey $state
+        Write-Host 'Installing depot files...'
+        Install-DepotFiles $contentPath $install.GamePath
+        $installed = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $install.GamePath $Definition.main_exe)).FileVersion
+        if (-not $installed.StartsWith($target, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Expected $target, but the installed executable reports $installed. The backup is intact."
         }
+        Remove-ContentCatalog $Definition
+        Remove-Item -LiteralPath $contentPath -Recurse -Force
     }
-    Save-State $GameKey $state
-    Write-Host 'Installing depot files...'
-    Install-DepotFiles $contentPath $install.GamePath
-    $installed = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $install.GamePath $Definition.main_exe)).FileVersion
-    if (-not $installed.StartsWith($target, [StringComparison]::OrdinalIgnoreCase)) {
-        throw "Expected $target, but the installed executable reports $installed. The backup is intact."
+    finally {
+        if (-not $ManagedRestart) { Start-SteamAgain $steamRoots $steamWasRunning }
     }
-    Remove-ContentCatalog $Definition
-    Remove-Item -LiteralPath $contentPath -Recurse -Force
     Write-Host "Downgrade complete: $installed" -ForegroundColor Green
     if ($createBackup) { Write-Host "Backup retained at $backupPath" }
 }

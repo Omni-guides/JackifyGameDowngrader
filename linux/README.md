@@ -6,7 +6,6 @@ Downgrades the Steam version of Skyrim Special Edition or Fallout 4 to a support
 
 - Python 3.10 or newer is required.
 - You must own the game on Steam.
-- Close Steam and the game before starting. If either is still running, the tool asks you to close it before continuing.
 - Extract the entire ZIP to a normal folder.
 - Make sure you have enough free space for the download. If you choose to make a backup, you also need enough space for another complete copy of the game.
 
@@ -25,6 +24,8 @@ chmod +x jackify-game-downgrader
 ```
 
 The tool will ask which game and version you want. It will also offer to back up the current game before making changes. A backup is recommended, but you can skip it if space is limited.
+
+Before continuing, you must accept a warning that Steam will close. This also closes any game currently running through Steam. The tool starts Steam again when it finishes.
 
 SteamCMD will ask for your Steam password and, if enabled, Steam Guard approval. These go directly to Valve's SteamCMD and are not saved by this tool. The downgrade can take some time because it downloads several gigabytes of game files.
 
@@ -50,8 +51,11 @@ Most users do not need these:
 ./jackify-game-downgrader list-games
 ./jackify-game-downgrader list-versions --game skyrim_se
 ./jackify-game-downgrader restore --game fallout4
+./jackify-game-downgrader --game fallout4 --managed-restart
 ```
 
 `--dry-run` still downloads the game files, but does not change the installed game or its Steam settings.
 
 Downloaded depot files are deleted after a successful downgrade. They are kept after a failure so you can retry without downloading everything again.
+
+`--managed-restart` is for launchers such as Jackify that manage Steam themselves. Most users do not need it.
