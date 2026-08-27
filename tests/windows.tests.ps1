@@ -17,6 +17,8 @@ function Assert-True([bool]$Value, [string]$Name) {
 $temp = Join-Path $PSScriptRoot ('.tmp-' + [guid]::NewGuid().ToString('N'))
 try {
     [void](New-Item -ItemType Directory -Path $temp)
+    $script:StateRoot = Join-Path $temp 'state'
+    $script:DataRoot = Join-Path $temp 'data'
 
     $games = Get-GameDefinitions
     Assert-Equal 2 $games.Count 'game count'
@@ -105,6 +107,15 @@ try {
 
     Assert-Equal (Join-Path $env:LOCALAPPDATA 'Skyrim Special Edition\ContentCatalog.txt') (Get-ContentCatalogPath $games['skyrim_se']) 'content catalog path'
     Assert-True ((Get-BackupPath $game '1.2.3.4' $null).EndsWith('game (1.2.3.4)')) 'backup name'
+
+    $savedState = [ordered]@{ game_path = $game; backup_path = $copy; version = '1.0' }
+    Save-State 'skyrim_se' $savedState
+    Assert-Equal '1.0' (Load-State 'skyrim_se').version 'persistent state round trip'
+    $legacyState = Join-Path $DataRoot 'fallout4\state.json'
+    [void](New-Item -ItemType Directory -Path (Split-Path -Parent $legacyState) -Force)
+    [IO.File]::WriteAllText($legacyState, '{"version":"1.10.163"}')
+    Assert-Equal '1.10.163' (Load-State 'fallout4').version 'legacy state migration'
+    Assert-True (-not (Test-Path -LiteralPath $legacyState)) 'legacy state moved'
 
     $liveLog = Join-Path $temp 'console_log.txt'
     [IO.File]::WriteAllText($liveLog, 'Downloading depot 1')

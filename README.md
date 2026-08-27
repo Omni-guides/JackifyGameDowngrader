@@ -71,7 +71,7 @@ If you enter an invalid number, the tool asks again.
 The tool finds the game, shows the planned version change, and offers to copy the complete game folder before changing it:
 
 ```text
-Skyrim Special Edition: 1.7.99.0 -> 1.6.1170
+Skyrim Special Edition: 1.7.104.0 -> 1.6.1170
 Game folder: D:\SteamLibrary\steamapps\common\Skyrim Special Edition
 Create a full 17.2 GB backup? Recommended, but optional [Y/n]:
 ```
@@ -82,7 +82,7 @@ Create a full 17.2 GB backup? Recommended, but optional [Y/n]:
 If selected, the backup is stored beside the game folder and is not deleted automatically:
 
 ```text
-Full backup: D:\SteamLibrary\steamapps\common\Skyrim Special Edition (1.7.99.0)
+Full backup: D:\SteamLibrary\steamapps\common\Skyrim Special Edition (1.7.104.0)
 Backup size: approximately 17.2 GB. It remains until restored or deleted by you.
 Proceed? [y/N]: y
 ```
@@ -146,7 +146,7 @@ Removed stale Creation Club content catalog: C:\Users\...\AppData\Local\Skyrim S
 Starting Steam...
 Steam started.
 Downgrade complete: 1.6.1170.0
-Backup retained at D:\SteamLibrary\steamapps\common\Skyrim Special Edition (1.7.99.0)
+Backup retained at D:\SteamLibrary\steamapps\common\Skyrim Special Edition (1.7.104.0)
 ```
 
 When you see `Downgrade complete`, press a key to close the window.
@@ -190,7 +190,7 @@ The tool locates the game and lists the newest downgrade target first. Enter `1`
 ```text
 == Skyrim Special Edition ==
 Location:       /home/user/.local/share/Steam/steamapps/common/Skyrim Special Edition
-Current version: 1.7.99.0
+Current version: 1.7.104.0
 
 Downgrade to:
   1) 1.6.1170
@@ -216,11 +216,10 @@ The plan shows exactly what will happen:
 == Plan ==
 Downgrade Skyrim Special Edition to 1.6.1170:
   Game folder: /home/user/.local/share/Steam/steamapps/common/Skyrim Special Edition
-  Current install backed up to: /home/user/.local/share/Steam/steamapps/common/Skyrim Special Edition (1.7.99.0)
+  Current install backed up to: /home/user/.local/share/Steam/steamapps/common/Skyrim Special Edition (1.7.104.0)
   Approximate backup size: 17.2 GB
   The backup remains until restored or deleted by you
   Steam auto-update for Skyrim Special Edition set to 'only update when launched'
-  Steam manifest (appmanifest_489830.acf) set to read-only
 Proceed? [y/N]: y
 ```
 
@@ -254,9 +253,8 @@ Stopping Steam...
 
 == Applying downgrade ==
 Backing up the current install and copying downgraded files in...
-Backup saved to /home/user/.local/share/Steam/steamapps/common/Skyrim Special Edition (1.7.99.0)
+Backup saved to /home/user/.local/share/Steam/steamapps/common/Skyrim Special Edition (1.7.104.0)
 Set Skyrim Special Edition to 'only update when launched' in Steam.
-Set appmanifest_489830.acf to read-only so Steam can't rewrite it back.
 Removed stale Creation Club content catalog (ContentCatalog.txt);
 Steam regenerates it on next launch.
 Starting Steam...
@@ -264,14 +262,19 @@ Steam started.
 
 == Done ==
 Skyrim Special Edition is now on 1.6.1170.
-Use Offline Mode or avoid clicking Update if Steam prompts for one.
+Do not launch vanilla Skyrim Special Edition through Steam or click Update.
+Launch your modded setup through its MO2 shortcut instead.
 ```
+
+On Linux, Steam may make its game manifest writable again after an MO2/Proton session. Preventing that reliably requires elevated filesystem permissions, so the Linux version does not rely on the manifest remaining read-only.
 
 ## Restoring or changing version
 
 Run the tool again and choose option `3`, **Restore a previous downgrade**.
 
 If you made a backup, restore puts it back and returns the Steam settings changed by the tool to their previous values. If you skipped the backup, it restores those settings and tells you to use Steam's **Verify integrity of game files** option to download the current game again.
+
+Restore records are kept in your user profile so they survive tool updates and new ZIP extractions. If a record is missing, the tool lists compatible backup folders beside the game and asks which one to restore.
 
 To change from one older version to another, run the downgrade again and select the new target. The original pre-downgrade backup is retained and remains the version used by restore.
 
@@ -325,9 +328,11 @@ Before continuing, the tool shows the game path, backup choice, and required dis
 - Optionally copies the complete current game folder to a version-labelled backup beside it.
 - Installs the selected depot files.
 - Sets Steam to update the game only when launched.
-- Marks the app manifest read-only.
+- On Windows, marks the app manifest read-only.
 - Removes stale `ContentCatalog.txt` data that can crash an older game build.
 - Records the backup and prior Steam settings for restore.
+
+On Linux, do not launch the vanilla game through Steam or accept an update. Launch the modded setup through its MO2 shortcut instead.
 
 Depot downloads are removed after success and retained after failure so the operation can be retried.
 
@@ -342,7 +347,7 @@ Depot downloads are removed after success and retained after failure so the oper
 Build local release files in the workspace-level `../dist/` directory:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-release.ps1 -Version 0.2.2
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-release.ps1 -Version 0.2.3
 ```
 
 ## License

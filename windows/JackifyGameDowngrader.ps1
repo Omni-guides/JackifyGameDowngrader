@@ -16,7 +16,9 @@ $ErrorActionPreference = 'Stop'
 
 $ScriptRoot = $PSScriptRoot
 $DataRoot = Join-Path $ScriptRoot 'data'
+$StateRoot = if ($env:JGD_STATE_DIR) { $env:JGD_STATE_DIR } else { Join-Path $env:LOCALAPPDATA 'JackifyGameDowngrader' }
 $SteamCmdUrl = 'https://steamcdn-a.akamaihd.net/client/installer/steamcmd.zip'
+$BackupStateName = '.jackify-game-downgrader.json'
 
 function Get-GamesPath {
     $local = Join-Path $ScriptRoot 'games'
@@ -75,8 +77,13 @@ function Select-InteractiveAction([Collections.IDictionary]$Games) {
 
 function Select-RestoreGame([Collections.IDictionary]$Games) {
     $available = [ordered]@{}
+    $steamRoots = @(Get-SteamRoots)
+    $libraries = @(Get-LibraryRoots $steamRoots)
     foreach ($key in $Games.Keys) {
-        if (Load-State $key) { $available[$key] = $Games[$key] }
+        $install = Find-GameInstall $libraries $Games[$key]
+        if ((Load-State $key) -or (Get-BackupCandidates $install $Games[$key])) {
+            $available[$key] = $Games[$key]
+        }
     }
     if ($available.Count -eq 0) { return $null }
     if ($available.Count -eq 1) { return @($available.Keys)[0] }
@@ -433,7 +440,11 @@ function Copy-Tree([string]$Source, [string]$Destination) {
 function Reset-GameFromBackup([string]$GamePath, [string]$BackupPath) {
     if (-not (Test-Path -LiteralPath $BackupPath -PathType Container)) { throw "Backup not found: $BackupPath" }
     Remove-Item -LiteralPath $GamePath -Recurse -Force
-    try { Copy-Tree $BackupPath $GamePath }
+    try {
+        Copy-Tree $BackupPath $GamePath
+        $marker = Join-Path $GamePath $BackupStateName
+        if (Test-Path -LiteralPath $marker -PathType Leaf) { Remove-Item -LiteralPath $marker -Force }
+    }
     catch {
         Write-Host "Reset failed. The original backup remains intact at $BackupPath" -ForegroundColor Red
         throw
@@ -551,7 +562,7 @@ function Remove-ContentCatalog($Definition) {
     }
 }
 
-function Get-StatePath([string]$GameKey) { return (Join-Path $DataRoot "$GameKey\state.json") }
+function Get-StatePath([string]$GameKey) { return (Join-Path $StateRoot "$GameKey\state.json") }
 
 function Save-State([string]$GameKey, $State) {
     $path = Get-StatePath $GameKey
@@ -561,8 +572,64 @@ function Save-State([string]$GameKey, $State) {
 
 function Load-State([string]$GameKey) {
     $path = Get-StatePath $GameKey
+    $legacy = Join-Path $DataRoot "$GameKey\state.json"
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf) -and (Test-Path -LiteralPath $legacy -PathType Leaf)) {
+        [void](New-Item -ItemType Directory -Path (Split-Path -Parent $path) -Force)
+        Move-Item -LiteralPath $legacy -Destination $path
+    }
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
     return [IO.File]::ReadAllText($path) | ConvertFrom-Json
+}
+
+function Get-BackupCandidates($Install, $Definition) {
+    if (-not $Install) { return @() }
+    $parent = Split-Path -Parent $Install.GamePath
+    $prefix = (Split-Path -Leaf $Install.GamePath) + ' ('
+    return @(Get-ChildItem -LiteralPath $parent -Directory | Where-Object {
+        $_.Name.StartsWith($prefix) -and
+        (Test-Path -LiteralPath (Join-Path $_.FullName $Definition.main_exe) -PathType Leaf)
+    } | Sort-Object Name)
+}
+
+function Recover-State([string]$GameKey, $Definition, [string[]]$SteamRoots) {
+    $install = Find-GameInstall @(Get-LibraryRoots $SteamRoots) $Definition
+    $backups = @(Get-BackupCandidates $install $Definition)
+    if (-not $backups) { return $null }
+    Write-Host "Found $($backups.Count) backup folder(s) beside $($Definition.name):"
+    for ($i = 0; $i -lt $backups.Count; $i++) {
+        $version = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $backups[$i].FullName $Definition.main_exe)).FileVersion
+        Write-Host "  $($i + 1)) $($backups[$i].Name) [$version]"
+    }
+    while ($true) {
+        $answer = (Read-Host 'Choose a backup to restore, or press Enter to cancel').Trim()
+        if (-not $answer) { return $null }
+        $choice = 0
+        if ([int]::TryParse($answer, [ref]$choice) -and $choice -ge 1 -and $choice -le $backups.Count) { break }
+        Write-Host "Enter a number from 1 to $($backups.Count)." -ForegroundColor Yellow
+    }
+    $backup = $backups[$choice - 1].FullName
+    $marker = Join-Path $backup $BackupStateName
+    if (Test-Path -LiteralPath $marker -PathType Leaf) {
+        $state = [IO.File]::ReadAllText($marker) | ConvertFrom-Json
+        $state.game_path = $install.GamePath
+        $state.backup_path = $backup
+    }
+    else {
+        $state = [ordered]@{
+            game_path = $install.GamePath
+            backup_path = $backup
+            version = $install.Version
+            prior_version = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $backup $Definition.main_exe)).FileVersion
+            prior_buildid = $null
+            acf_path = $install.AcfPath
+            acf_was_readonly = $false
+            localconfigs = @()
+            timestamp = 'recovered from backup folder'
+            recovered = $true
+        }
+    }
+    Save-State $GameKey $state
+    return (Load-State $GameKey)
 }
 
 function Confirm-Action([string]$Prompt) { return ((Read-Host "$Prompt [y/N]").Trim().ToLowerInvariant() -eq 'y') }
@@ -574,7 +641,8 @@ function Confirm-DefaultYes([string]$Prompt) {
 
 function Invoke-Restore([string]$GameKey, $Definition, [string[]]$SteamRoots) {
     $state = Load-State $GameKey
-    if (-not $state) { throw "No downgrade state found for $($Definition.name)." }
+    if (-not $state) { $state = Recover-State $GameKey $Definition $SteamRoots }
+    if (-not $state) { throw "No downgrade state or backup folder was found for $($Definition.name)." }
     if (-not $ManagedRestart -and -not (Confirm-SteamRestartWarning)) { Write-Host 'Aborted.'; return }
     Write-Host "Game folder: $($state.game_path)"
     if ($state.backup_path) { Write-Host "Backup:      $($state.backup_path)" }
@@ -597,6 +665,8 @@ function Invoke-Restore([string]$GameKey, $Definition, [string[]]$SteamRoots) {
             try { [IO.Directory]::Move($backupPath, $gamePath) }
             catch { [IO.Directory]::Move($temporary, $gamePath); throw }
             Remove-Item -LiteralPath $temporary -Recurse -Force
+            $marker = Join-Path $gamePath $BackupStateName
+            if (Test-Path -LiteralPath $marker -PathType Leaf) { Remove-Item -LiteralPath $marker -Force }
         }
         foreach ($config in @($state.localconfigs)) {
             if (-not (Test-Path -LiteralPath $config.path -PathType Leaf)) { continue }
@@ -613,6 +683,9 @@ function Invoke-Restore([string]$GameKey, $Definition, [string[]]$SteamRoots) {
     if ($backupPath) { Write-Host 'Restore complete.' -ForegroundColor Green }
     else {
         Write-Host 'Steam settings restored. Use Steam Verify Integrity of Game Files to reinstall the current game build.' -ForegroundColor Green
+    }
+    if ($state.PSObject.Properties['recovered']) {
+        Write-Host 'The original Steam update setting was unavailable and was left unchanged.' -ForegroundColor Yellow
     }
 }
 
@@ -715,7 +788,7 @@ function Invoke-Downgrade([string]$GameKey, $Definition, [string]$TargetVersion,
                 }
             }
             $acfWasReadOnly = Set-ManifestReadOnly $install.AcfPath
-            $state = [ordered]@{
+        $state = [ordered]@{
                 game_path = $install.GamePath
                 backup_path = $(if ($createBackup) { $backupPath } else { $null })
                 version = $target
@@ -724,10 +797,18 @@ function Invoke-Downgrade([string]$GameKey, $Definition, [string]$TargetVersion,
                 acf_path = $install.AcfPath
                 acf_was_readonly = $acfWasReadOnly
                 localconfigs = $configState
-                timestamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
-            }
+            timestamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+            recovered = $false
         }
-        Save-State $GameKey $state
+    }
+    Save-State $GameKey $state
+    if ($state.backup_path) {
+        [IO.File]::WriteAllText(
+            (Join-Path ([string]$state.backup_path) $BackupStateName),
+            ($state | ConvertTo-Json -Depth 8),
+            [Text.UTF8Encoding]::new($false)
+        )
+    }
         Write-Host 'Installing depot files...'
         Install-DepotFiles $contentPath $install.GamePath
         $installed = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $install.GamePath $Definition.main_exe)).FileVersion

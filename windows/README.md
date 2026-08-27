@@ -27,6 +27,8 @@ Run `JackifyGameDowngrader.cmd` again and choose **Restore a previous downgrade*
 
 If you made a backup, restore puts it back. Without a backup, the tool restores the Steam settings it changed and tells you to use Steam's **Verify integrity of game files** option to download the current game again.
 
+Restore records are stored in `%LOCALAPPDATA%\JackifyGameDowngrader\` so they survive tool updates and new ZIP extractions. If a record is missing, the tool can find compatible backup folders beside the game and ask which one to restore.
+
 To change to a different older version, run the downgrader again and choose the new version. Your original backup is kept for a later restore.
 
 Backups are stored beside the game folder and are not deleted automatically. Delete an unwanted backup yourself when you are certain you no longer need it.

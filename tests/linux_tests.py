@@ -11,7 +11,7 @@ sys.path.insert(0, str(ROOT / "linux"))
 if sys.platform == "win32":
     sys.modules["pty"] = ModuleType("pty")
 
-from game_downgrade import cli, steam_lifecycle, swap, updatelock
+from game_downgrade import cli, paths, steam_lifecycle, swap, updatelock
 
 
 class LinuxTests(unittest.TestCase):
@@ -29,6 +29,22 @@ class LinuxTests(unittest.TestCase):
             self.assertIn('"AutoUpdateBehavior"\t\t"1"', path.read_text())
             updatelock.revert_update_behavior(path, 489830, prior)
             self.assertIn('"AutoUpdateBehavior"\t\t"0"', path.read_text())
+
+    def test_persistent_state_migration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old_root = root / "old"
+            old_state = old_root / "skyrim_se" / "state.json"
+            old_state.parent.mkdir(parents=True)
+            content = '{"version": "1.6.1170"}'
+            old_state.write_text(content)
+            with patch.object(paths, "ROOT_DATA_DIR", old_root), patch.dict(
+                "os.environ", {"JGD_STATE_DIR": str(root / "state")}
+            ):
+                state_dir = paths.game_data_dir("skyrim_se")
+            self.assertEqual(state_dir, root / "state" / "skyrim_se")
+            self.assertEqual((state_dir / "state.json").read_text(), content)
+            self.assertFalse(old_state.exists())
 
     def test_preview(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -58,6 +74,44 @@ class LinuxTests(unittest.TestCase):
             swap.reset_game_from_backup(game, backup_dir)
             self.assertTrue((game / "original.txt").is_file())
             self.assertTrue((backup_dir / "original.txt").is_file())
+
+    def test_backup_state_marker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            game = root / "game"
+            depot = root / "content" / "depot_1"
+            game.mkdir()
+            depot.mkdir(parents=True)
+            (game / "game.exe").write_text("old")
+            (depot / "game.exe").write_text("new")
+            backup = swap.apply_downgrade(
+                game, depot.parent, "1.0", "2.0", None, root / "state"
+            )
+            self.assertIsNotNone(backup)
+            marker = swap.load_backup_state(backup)
+            self.assertEqual(marker["backup_path"], str(backup))
+            swap.restore_from_state(root / "state")
+            self.assertFalse((game / swap.BACKUP_STATE).exists())
+
+    def test_recover_missing_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            game_path = root / "Skyrim Special Edition"
+            game_path.mkdir()
+            acf = root / "appmanifest_489830.acf"
+            acf.write_text("test")
+            for name in ("Skyrim Special Edition (1.6.1170.0)", "Skyrim Special Edition (1.7.99.0)"):
+                backup = root / name
+                backup.mkdir()
+                (backup / "SkyrimSE.exe").write_text("test")
+            install = cli.steam_paths.GameInstall(game_path, root, acf, None, "1.6.1170.0")
+            game = {"appid": 489830, "main_exe": "SkyrimSE.exe", "name": "Skyrim Special Edition"}
+            with patch("game_downgrade.cli.steam_paths.find_game", return_value=install), patch(
+                "game_downgrade.cli.read_file_version", return_value=None
+            ), patch("builtins.input", return_value="2"):
+                state = cli._recover_state(game, root / "state")
+            self.assertTrue(state["recovered"])
+            self.assertTrue(state["backup_path"].endswith("Skyrim Special Edition (1.7.99.0)"))
 
     @patch("game_downgrade.steam_lifecycle._stop_process")
     @patch("game_downgrade.steam_lifecycle._wait_for_exit")

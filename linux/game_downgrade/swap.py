@@ -5,6 +5,8 @@ import shutil
 import time
 from pathlib import Path
 
+BACKUP_STATE = ".jackify-game-downgrader.json"
+
 
 def _content_files(content_dir: Path):
     for depot_dir in sorted(content_dir.iterdir()):
@@ -37,6 +39,9 @@ def reset_game_from_backup(game_path: Path, backup_path: Path) -> None:
     shutil.rmtree(game_path)
     try:
         shutil.copytree(backup_path, game_path)
+        marker = game_path / BACKUP_STATE
+        if marker.is_file():
+            marker.unlink()
     except BaseException:
         raise RuntimeError(
             f"Reset failed. The original backup remains intact at {backup_path}."
@@ -78,8 +83,9 @@ def apply_downgrade(
             "localconfigs": localconfigs or [],
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
-    data_dir.mkdir(parents=True, exist_ok=True)
-    _state_path(data_dir).write_text(json.dumps(state, indent=2))
+    save_state(data_dir, state)
+    if backup_path is not None:
+        (backup_path / BACKUP_STATE).write_text(json.dumps(state, indent=2))
 
     for src, rel in _content_files(content_dir):
         dest = game_path / rel
@@ -95,6 +101,11 @@ def clear_state(data_dir: Path) -> None:
         path.unlink()
 
 
+def save_state(data_dir: Path, state: dict) -> None:
+    data_dir.mkdir(parents=True, exist_ok=True)
+    _state_path(data_dir).write_text(json.dumps(state, indent=2))
+
+
 def _state_path(data_dir: Path) -> Path:
     return data_dir / "state.json"
 
@@ -104,6 +115,16 @@ def load_state(data_dir: Path) -> dict | None:
     if not path.is_file():
         return None
     return json.loads(path.read_text())
+
+
+def load_backup_state(backup_path: Path) -> dict | None:
+    path = backup_path / BACKUP_STATE
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
 
 
 def restore_from_state(data_dir: Path) -> None:
@@ -118,4 +139,7 @@ def restore_from_state(data_dir: Path) -> None:
 
     shutil.rmtree(game_path)
     shutil.move(str(backup_path), str(game_path))
+    marker = game_path / BACKUP_STATE
+    if marker.is_file():
+        marker.unlink()
     _state_path(data_dir).unlink()

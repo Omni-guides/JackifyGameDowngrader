@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import shutil
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -13,7 +14,7 @@ from . import steam_lifecycle, steam_paths, steamcmd, swap, updatelock
 
 def _newest_versions_first(versions):
     return sorted(versions, key=lambda value: tuple(int(part) for part in value.split(".")), reverse=True)
-from .paths import game_data_dir
+from .paths import STEAMCMD_DIR, game_data_dir
 from .pe_version import read_file_version
 
 GAMES_DIR = Path(__file__).parents[2] / "games"
@@ -132,13 +133,70 @@ def _restart_steam(session: steam_lifecycle.Session) -> None:
         print("Steam could not be restarted automatically. Please start it manually.")
 
 
+def _backup_candidates(game: dict):
+    install = steam_paths.find_game(game["appid"], game["main_exe"])
+    if install is None:
+        return None, []
+    prefix = f"{install.game_path.name} ("
+    backups = [
+        path for path in install.game_path.parent.iterdir()
+        if path.is_dir() and path.name.startswith(prefix) and (path / game["main_exe"]).is_file()
+    ]
+    return install, sorted(backups, key=lambda path: path.name)
+
+
+def _recover_state(game: dict, data_dir: Path) -> dict | None:
+    install, backups = _backup_candidates(game)
+    if not backups:
+        return None
+    print(f"Found {len(backups)} backup folder(s) beside {game['name']}:")
+    for index, backup in enumerate(backups, 1):
+        version = read_file_version(backup / game["main_exe"]) or "unknown version"
+        print(f"  {index}) {backup.name} [{version}]")
+    while True:
+        choice = input("Choose a backup to restore, or press Enter to cancel: ").strip()
+        if not choice:
+            return None
+        try:
+            index = int(choice) - 1
+            if index < 0:
+                raise IndexError
+            backup = backups[index]
+            break
+        except (ValueError, IndexError):
+            print(f"Enter a number from 1 to {len(backups)}.")
+
+    state = swap.load_backup_state(backup)
+    if state is None:
+        current_mode = stat.S_IMODE(install.acf_path.stat().st_mode)
+        state = {
+            "game_path": str(install.game_path),
+            "backup_path": str(backup),
+            "version": install.version,
+            "prior_version": read_file_version(backup / game["main_exe"]),
+            "prior_buildid": None,
+            "acf_path": str(install.acf_path),
+            "prior_acf_mode": current_mode | stat.S_IWUSR,
+            "localconfigs": [],
+            "timestamp": "recovered from backup folder",
+            "recovered": True,
+        }
+    else:
+        state["game_path"] = str(install.game_path)
+        state["backup_path"] = str(backup)
+    swap.save_state(data_dir, state)
+    return state
+
+
 def cmd_restore(args: argparse.Namespace) -> int:
     game_key, game = _resolve_game(args)
     data_dir = game_data_dir(game_key)
     state = swap.load_state(data_dir)
     if state is None:
-        print(f"No downgrade state found for {game['name']}; nothing to restore.")
-        return 1
+        state = _recover_state(game, data_dir)
+        if state is None:
+            print(f"No downgrade state or backup folder was found for {game['name']}.")
+            return 1
     managed_restart = getattr(args, "managed_restart", False)
     if not managed_restart and not _accept_steam_warning():
         print("Aborted.")
@@ -146,8 +204,10 @@ def cmd_restore(args: argparse.Namespace) -> int:
 
     _section(f"Restore: {game['name']}")
     print(f"Game folder: {state['game_path']}")
-    if state.get("backup_path"):
+    if state.get("backup_path") and not state.get("recovered"):
         print(f"Backup taken: {state['timestamp']} (just before downgrading to {state['version']})")
+    elif state.get("backup_path"):
+        print(f"Backup selected: {state['backup_path']}")
     else:
         print("Backup taken: none; Steam verification will be required")
     if not _confirm("Proceed?"):
@@ -203,6 +263,8 @@ def cmd_restore(args: argparse.Namespace) -> int:
     if state.get("backup_path"):
         print("Restore complete. Run 'Verify Integrity of Game Files' in Steam to fully")
         print("resync anything this tool didn't track (e.g. Creation Club content).")
+        if state.get("recovered"):
+            print("The original Steam update setting was unavailable and was left unchanged.")
     else:
         print("Steam settings restored. Run 'Verify Integrity of Game Files' in Steam")
         print("to reinstall the current game build.")
@@ -263,18 +325,18 @@ def cmd_downgrade(args: argparse.Namespace) -> int:
 
     download_size = int(game.get("download_size_gb", 0)) * 10**9
     backup_parent = install.game_path.parent
-    data_parent = data_dir.parent
+    download_parent = STEAMCMD_DIR
     same_device = (
         os.stat(_existing_parent(backup_parent)).st_dev
-        == os.stat(_existing_parent(data_parent)).st_dev
+        == os.stat(_existing_parent(download_parent)).st_dev
     )
     if create_backup and same_device:
         _assert_free_space(
-            data_parent, download_size + game_size,
+            download_parent, download_size + game_size,
             "Depot downloads and the full backup",
         )
     else:
-        _assert_free_space(data_parent, download_size, "Depot downloads")
+        _assert_free_space(download_parent, download_size, "Depot downloads")
         if create_backup:
             _assert_free_space(backup_parent, game_size, "The full backup")
 
@@ -302,24 +364,18 @@ def cmd_downgrade(args: argparse.Namespace) -> int:
         else:
             print("  Full backup skipped; Steam must redownload the game to recover it")
         print(f"  Steam auto-update for {game['name']} set to 'only update when launched'")
-        print(f"  Steam manifest (appmanifest_{game['appid']}.acf) set to read-only")
     if not _confirm("Proceed?"):
         print("Aborted.")
         return 1
     data_dir.parent.mkdir(parents=True, exist_ok=True)
     _test_directory_write(data_dir.parent)
+    _test_directory_write(_existing_parent(download_parent))
     if not args.dry_run:
         _test_directory_write(install.game_path)
         if create_backup:
             _test_directory_write(install.game_path.parent)
         for localconfig in steam_paths.find_userdata_localconfigs():
             _test_file_write(localconfig)
-        try:
-            install.acf_path.chmod(install.acf_path.stat().st_mode)
-        except OSError as exc:
-            raise RuntimeError(
-                f"Cannot change file permissions on {install.acf_path}."
-            ) from exc
 
     _section("Steam login & download")
     print("Your password/Steam Guard code goes straight to steamcmd (Valve's own tool).")
@@ -364,7 +420,7 @@ def cmd_downgrade(args: argparse.Namespace) -> int:
                 print(f"Could not find localconfig.vdf. Set {game['name']}'s Automatic Updates")
                 print("to 'Only update this game when I launch it' manually in Steam's")
                 print("game Properties, or it may silently re-update on next launch.")
-            prior_acf_mode = steam_paths.set_acf_readonly(install.acf_path)
+            prior_acf_mode = None
 
         _section("Applying downgrade")
         if retarget and existing_state.get("backup_path") and Path(existing_state["backup_path"]).is_dir():
@@ -385,7 +441,6 @@ def cmd_downgrade(args: argparse.Namespace) -> int:
             print(f"Backup saved to {backup_path}")
         if localconfigs:
             print(f"Set {game['name']} to 'only update when launched' in Steam.")
-        print(f"Set {install.acf_path.name} to read-only so Steam can't rewrite it back.")
 
         installed_version = read_file_version(install.game_path / game["main_exe"])
         if installed_version is None or not installed_version.startswith(version_key):
@@ -409,7 +464,8 @@ def cmd_downgrade(args: argparse.Namespace) -> int:
 
     _section("Done")
     print(f"{game['name']} is now on {version_key}.")
-    print("Use Offline Mode or avoid clicking Update if Steam prompts for one.")
+    print(f"Do not launch vanilla {game['name']} through Steam or click Update.")
+    print("Launch your modded setup through its MO2 shortcut instead.")
     return 0
 
 
@@ -431,7 +487,11 @@ def cmd_interactive(_args: argparse.Namespace) -> int:
                 game=keys[index], version=None, dry_run=False, no_backup=False,
             ))
         if index == len(keys):
-            available = [key for key in keys if swap.load_state(game_data_dir(key))]
+            available = []
+            for key in keys:
+                game = load_game(key)
+                if swap.load_state(game_data_dir(key)) or _backup_candidates(game)[1]:
+                    available.append(key)
             if not available:
                 print("No previous downgrade state was found.\n")
                 continue
