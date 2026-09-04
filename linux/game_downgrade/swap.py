@@ -65,6 +65,9 @@ def apply_downgrade(
     if existing_state is not None:
         state = dict(existing_state)
         backup_path = Path(state["backup_path"]) if state.get("backup_path") else None
+        if backup_path is not None and not backup_path.is_dir():
+            backup_path = None
+            state["backup_path"] = None
         state["version"] = version
         state["timestamp"] = time.strftime("%Y-%m-%d %H:%M:%S")
     else:

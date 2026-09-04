@@ -93,6 +93,32 @@ class LinuxTests(unittest.TestCase):
             swap.restore_from_state(root / "state")
             self.assertFalse((game / swap.BACKUP_STATE).exists())
 
+    def test_retarget_with_missing_backup_continues_without_backup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            game = root / "game"
+            depot = root / "content" / "depot_1"
+            game.mkdir()
+            depot.mkdir(parents=True)
+            (game / "game.exe").write_text("old")
+            (depot / "game.exe").write_text("new")
+            state = {
+                "game_path": str(game),
+                "backup_path": str(root / "missing-backup"),
+                "version": "1.0",
+            }
+
+            backup = swap.apply_downgrade(
+                game, depot.parent, "2.0", "1.0", None, root / "state",
+                create_backup=False,
+                existing_state=state,
+            )
+
+            self.assertIsNone(backup)
+            self.assertEqual((game / "game.exe").read_text(), "new")
+            saved_state = swap.load_state(root / "state")
+            self.assertIsNone(saved_state["backup_path"])
+
     def test_recover_missing_state(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
