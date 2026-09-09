@@ -21,8 +21,19 @@ try {
     $script:DataRoot = Join-Path $temp 'data'
 
     $games = Get-GameDefinitions
-    Assert-Equal 2 $games.Count 'game count'
+    Assert-Equal 4 $games.Count 'game count'
     Assert-Equal 'SkyrimSE.exe' $games['skyrim_se'].main_exe 'game data'
+    Assert-True (Test-CreationKit $games['skyrim_se_ck']) 'creation kit definition type'
+    Assert-Equal 1946160 $games['fallout4_ck'].appid 'fallout creation kit app id'
+    Assert-Equal 0 @(Get-ComponentRecords $null).Count 'null component records normalize to empty array'
+    Assert-Equal 0 @(Get-ComponentRecords ([ordered]@{})).Count 'missing component records normalize to empty array'
+    $oneRecordState = [ordered]@{ component_backup = [pscustomobject]@{ path = 'CreationKit.exe'; existed = $true } }
+    Assert-Equal 1 @(Get-ComponentRecords $oneRecordState).Count 'scalar component record normalizes to one item'
+    $manyRecordState = [ordered]@{ component_backup = @(
+        [pscustomobject]@{ path = 'CreationKit.exe'; existed = $true },
+        [pscustomobject]@{ path = 'CreationKit.ini'; existed = $false }
+    ) }
+    Assert-Equal 2 @(Get-ComponentRecords $manyRecordState).Count 'multiple component records remain an array'
 
     $vdf = @'
 "libraryfolders"
@@ -88,6 +99,32 @@ try {
     Install-DepotFiles $content $game
     Assert-Equal 'new' ([IO.File]::ReadAllText((Join-Path $game 'Data\old.txt'))) 'depot overwrite'
 
+    $componentGame = Join-Path $temp 'component-game'
+    $componentContent = Join-Path $temp 'component-content\depot_1'
+    [void](New-Item -ItemType Directory -Path $componentGame -Force)
+    [void](New-Item -ItemType Directory -Path $componentContent -Force)
+    [IO.File]::WriteAllText((Join-Path $componentGame 'game.exe'), 'game untouched')
+    [IO.File]::WriteAllText((Join-Path $componentGame 'CreationKit.exe'), 'new CK')
+    [IO.File]::WriteAllText((Join-Path $componentContent 'CreationKit.exe'), 'old CK')
+    [IO.File]::WriteAllText((Join-Path $componentContent 'ck-added.ini'), 'old setting')
+    $componentRecords = @(Backup-ComponentFiles 'test_ck' (Split-Path -Parent $componentContent) $componentGame @())
+    Assert-Equal 2 $componentRecords.Count 'first component backup records overwritten and added files'
+    Install-DepotFiles (Split-Path -Parent $componentContent) $componentGame
+    Restore-ComponentFiles 'test_ck' $componentGame $componentRecords
+    Assert-Equal 'new CK' ([IO.File]::ReadAllText((Join-Path $componentGame 'CreationKit.exe'))) 'component executable restored'
+    Assert-Equal 'game untouched' ([IO.File]::ReadAllText((Join-Path $componentGame 'game.exe'))) 'component leaves game file'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $componentGame 'ck-added.ini'))) 'component added file removed'
+
+    $noBackupGame = Join-Path $temp 'component-no-backup-game'
+    $noBackupContent = Join-Path $temp 'component-no-backup-content\depot_1'
+    [void](New-Item -ItemType Directory -Path $noBackupGame -Force)
+    [void](New-Item -ItemType Directory -Path $noBackupContent -Force)
+    [IO.File]::WriteAllText((Join-Path $noBackupGame 'CreationKit.exe'), 'current CK')
+    [IO.File]::WriteAllText((Join-Path $noBackupContent 'CreationKit.exe'), 'old CK')
+    Install-DepotFiles (Split-Path -Parent $noBackupContent) $noBackupGame
+    Assert-Equal 'old CK' ([IO.File]::ReadAllText((Join-Path $noBackupGame 'CreationKit.exe'))) 'component no-backup applies depot'
+    Assert-True (-not (Test-Path -LiteralPath (Get-ComponentBackupPath 'test_ck_no_backup'))) 'component no-backup creates no backup folder'
+
     $copy = Join-Path $temp 'copy'
     Copy-Tree $game $copy
     Assert-True (Test-Path -LiteralPath (Join-Path $copy 'new.txt')) 'full backup copy'
@@ -95,6 +132,21 @@ try {
     Reset-GameFromBackup $game $copy
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $game 'extra.txt'))) 'retarget reset removes extra file'
     Assert-True (Test-Path -LiteralPath (Join-Path $copy 'new.txt')) 'retarget keeps original backup'
+
+    $atomicBackup = Join-Path $temp 'atomic-backup'
+    New-FullBackup $game $atomicBackup
+    Assert-True (Test-Path -LiteralPath (Join-Path $atomicBackup 'new.txt')) 'staged full backup completes'
+    Assert-Equal 0 @(Get-ChildItem -LiteralPath $temp -Directory -Filter '.jgd-backup-staging-*').Count 'full backup leaves no staging folder'
+    $validBackupState = [ordered]@{ backup_path = $atomicBackup }
+    Assert-Equal $atomicBackup (Get-UsableFullBackupPath $validBackupState) 'existing full backup remains usable'
+    $missingBackupState = [ordered]@{ backup_path = (Join-Path $temp 'deleted-backup') }
+    Assert-Equal $null (Get-UsableFullBackupPath $missingBackupState) 'missing full backup resolves to no backup'
+    Assert-Equal $null $missingBackupState.backup_path 'missing full backup is cleared from state'
+    $failedBackup = $false
+    try { New-FullBackup (Join-Path $temp 'missing-source') (Join-Path $temp 'never-created-backup') }
+    catch { $failedBackup = $true }
+    Assert-True $failedBackup 'failed full backup reports an error'
+    Assert-Equal 0 @(Get-ChildItem -LiteralPath $temp -Directory -Filter '.jgd-backup-staging-*').Count 'failed full backup removes staging folder'
 
     $manifest = Join-Path $temp 'appmanifest.acf'
     [IO.File]::WriteAllText($manifest, 'test')
@@ -140,8 +192,10 @@ try {
     Assert-Equal 'skyrim_se' (Select-Game $games '') 'game menu retry'
     foreach ($response in @('9', '1')) { $script:MenuResponses.Enqueue($response) }
     Assert-Equal '1.6.1170' (Select-Version $games['skyrim_se'] '') 'version menu newest first'
-    foreach ($response in @('0', '3')) { $script:MenuResponses.Enqueue($response) }
+    foreach ($response in @('0', '5')) { $script:MenuResponses.Enqueue($response) }
     Assert-Equal 'restore' (Select-InteractiveAction $games).Action 'interactive restore menu'
+    $script:MenuResponses.Enqueue('6')
+    Assert-Equal 'exit' (Select-InteractiveAction $games).Action 'interactive exit menu'
     $script:MenuResponses.Enqueue('')
     Assert-True (Confirm-DefaultYes 'Backup') 'backup default yes'
     $script:MenuResponses.Enqueue('n')

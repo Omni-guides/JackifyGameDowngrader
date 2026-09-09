@@ -1,6 +1,6 @@
 # Jackify Game Downgrader for Linux
 
-Downgrades the Steam version of Skyrim Special Edition or Fallout 4 to a supported older version.
+Downgrades the Steam version of Skyrim Special Edition, Fallout 4, or either game's Creation Kit to a supported older version.
 
 ## Before you start
 
@@ -23,7 +23,7 @@ If Linux says the file is not executable, run this once and try again:
 chmod +x jackify-game-downgrader
 ```
 
-The tool will ask which game and version you want. It will also offer to back up the current game before making changes. A backup is recommended, but you can skip it if space is limited.
+The tool will ask which game or Creation Kit and version you want. Creation Kit choices are separate and optional: a game downgrade never changes its CK. Download the free CK through Steam and run it once before downgrading it. If it is missing after you select it, press Enter to return to the main menu and choose again. After an operation completes or is cancelled, the interactive tool returns to the main menu. The CK applications are officially Windows-only; their Linux choices are intended for Wine/Proton and modlist workflows. CK restore uses a small file-level backup and does not restore the shared parent game directory.
 
 Before continuing, you must accept a warning that Steam will close. This also closes any game currently running through Steam. The tool starts Steam again when it finishes.
 
@@ -56,6 +56,8 @@ Most users do not need these:
 ./jackify-game-downgrader list-versions --game skyrim_se
 ./jackify-game-downgrader restore --game fallout4
 ./jackify-game-downgrader --game fallout4 --managed-restart
+./jackify-game-downgrader --game fallout4_ck --version 1.10.162
+./jackify-game-downgrader --game skyrim_se_ck --version 1.6.1130
 ```
 
 `--dry-run` still downloads the game files, but does not change the installed game or its Steam settings.

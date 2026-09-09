@@ -1,6 +1,6 @@
 # Jackify Game Downgrader for Windows
 
-Downgrades the Steam version of Skyrim Special Edition or Fallout 4 to a supported older version.
+Downgrades the Steam version of Skyrim Special Edition, Fallout 4, or either game's Creation Kit to a supported older version.
 
 ## Before you start
 
@@ -13,7 +13,7 @@ Downgrades the Steam version of Skyrim Special Edition or Fallout 4 to a support
 
 Double-click `JackifyGameDowngrader.cmd` and follow the prompts.
 
-The tool will ask which game and version you want. It will also offer to back up the current game before making changes. A backup is recommended, but you can skip it if space is limited.
+The tool will ask which game or Creation Kit and version you want. Creation Kit choices are separate and optional: a game downgrade never changes its CK. Download the free CK through Steam and run it once before downgrading it. If it is missing after you select it, press any key to return to the main menu and choose again, or Esc to exit. After an operation completes or is cancelled, the interactive tool offers the same choice. For CK operations, the tool recommends a version based on the installed parent game but permits an advanced override, and backs up only the CK files being replaced rather than copying the shared game folder.
 
 Before continuing, you must accept a warning that Steam will close. This also closes any game currently running through Steam. The tool starts Steam again when it finishes.
 
@@ -46,6 +46,8 @@ Most users do not need these. They are available when running `JackifyGameDowngr
 .\JackifyGameDowngrader.ps1 -Game skyrim_se -ListVersions
 .\JackifyGameDowngrader.ps1 -Game fallout4 -Restore
 .\JackifyGameDowngrader.ps1 -Game fallout4 --managed-restart
+.\JackifyGameDowngrader.ps1 -Game fallout4_ck -Version 1.10.162
+.\JackifyGameDowngrader.ps1 -Game skyrim_se_ck -Version 1.6.1130
 ```
 
 `-DryRun` still downloads the game files, but does not change the installed game or its Steam settings.

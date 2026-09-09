@@ -21,9 +21,20 @@ GAMES_DIR = Path(__file__).parents[2] / "games"
 if not GAMES_DIR.is_dir():
     GAMES_DIR = Path(__file__).parent.parent / "games"
 
+RETURN_TO_MENU = 2
+
 
 def available_games() -> list[str]:
-    return sorted(p.stem for p in GAMES_DIR.glob("*.json"))
+    paths = list(GAMES_DIR.glob("*.json"))
+    return [
+        path.stem for path in sorted(
+            paths,
+            key=lambda item: (
+                json.loads(item.read_text()).get("component") == "creation_kit",
+                item.stem,
+            ),
+        )
+    ]
 
 
 def load_game(game_key: str) -> dict:
@@ -31,6 +42,17 @@ def load_game(game_key: str) -> dict:
     if not path.is_file():
         raise ValueError(f"Unknown game '{game_key}'. Available: {', '.join(available_games())}")
     return json.loads(path.read_text())
+
+
+def _is_component(game: dict) -> bool:
+    return game.get("component") == "creation_kit"
+
+
+def _parent_version(game: dict) -> str | None:
+    if not _is_component(game):
+        return None
+    parent = steam_paths.find_game(game["parent_appid"], game["parent_main_exe"])
+    return parent.version if parent else None
 
 
 def _resolve_game(args: argparse.Namespace) -> tuple[str, dict]:
@@ -112,7 +134,8 @@ def cmd_list_versions(args: argparse.Namespace) -> int:
     _key, game = _resolve_game(args)
     print(f"Available downgrade targets for {game['name']}:")
     for key in _newest_versions_first(game["versions"]):
-        print(f"  {key}")
+        note = game["versions"][key].get("note")
+        print(f"  {key}{f' - {note}' if note else ''}")
     return 0
 
 
@@ -134,6 +157,8 @@ def _restart_steam(session: steam_lifecycle.Session) -> None:
 
 
 def _backup_candidates(game: dict):
+    if _is_component(game):
+        return steam_paths.find_game(game["appid"], game["main_exe"]), []
     install = steam_paths.find_game(game["appid"], game["main_exe"])
     if install is None:
         return None, []
@@ -192,11 +217,11 @@ def cmd_restore(args: argparse.Namespace) -> int:
     game_key, game = _resolve_game(args)
     data_dir = game_data_dir(game_key)
     state = swap.load_state(data_dir)
-    if state is None:
+    if state is None and not _is_component(game):
         state = _recover_state(game, data_dir)
-        if state is None:
-            print(f"No downgrade state or backup folder was found for {game['name']}.")
-            return 1
+    if state is None:
+        print(f"No downgrade state or backup was found for {game['name']}.")
+        return 1
     managed_restart = getattr(args, "managed_restart", False)
     if not managed_restart and not _accept_steam_warning():
         print("Aborted.")
@@ -204,7 +229,9 @@ def cmd_restore(args: argparse.Namespace) -> int:
 
     _section(f"Restore: {game['name']}")
     print(f"Game folder: {state['game_path']}")
-    if state.get("backup_path") and not state.get("recovered"):
+    if _is_component(game) and state.get("component_backup"):
+        print("Backup taken: Creation Kit files only (the parent game is untouched)")
+    elif state.get("backup_path") and not state.get("recovered"):
         print(f"Backup taken: {state['timestamp']} (just before downgrading to {state['version']})")
     elif state.get("backup_path"):
         print(f"Backup selected: {state['backup_path']}")
@@ -216,13 +243,21 @@ def cmd_restore(args: argparse.Namespace) -> int:
 
     game_path = Path(state["game_path"])
     steam_root = game_path.parents[2]
+    recorded_backup = state.get("backup_path")
+    if recorded_backup and not Path(recorded_backup).is_dir():
+        print(f"The recorded backup is missing: {recorded_backup}")
+        print("Steam settings will still be restored; verify the game through Steam to recover its files.")
+        state["backup_path"] = None
+        swap.save_state(data_dir, state)
     steam_session = None
     if not managed_restart:
         print("Stopping Steam...")
         steam_session = steam_lifecycle.stop(game["main_exe"])
 
     try:
-        if state.get("backup_path"):
+        if _is_component(game) and state.get("component_backup"):
+            swap.restore_component_from_state(data_dir)
+        elif state.get("backup_path"):
             swap.restore_from_state(data_dir)
 
         config_states = state.get("localconfigs", [])
@@ -245,13 +280,14 @@ def cmd_restore(args: argparse.Namespace) -> int:
             steam_paths.restore_acf_writable(acf_path, state["prior_acf_mode"])
             print(f"Restored write permissions on {acf_path.name}.")
 
-        content_catalog = steam_paths.find_content_catalog(
-            steam_root, game["appid"], game_path.name
-        )
-        if content_catalog.is_file():
-            content_catalog.unlink()
-            print("Removed stale Creation Club content catalog (ContentCatalog.txt);")
-            print("Steam regenerates it on next launch.")
+        if not _is_component(game):
+            content_catalog = steam_paths.find_content_catalog(
+                steam_root, game["appid"], game_path.name
+            )
+            if content_catalog.is_file():
+                content_catalog.unlink()
+                print("Removed stale Creation Club content catalog (ContentCatalog.txt);")
+                print("Steam regenerates it on next launch.")
 
         if not state.get("backup_path"):
             swap.clear_state(data_dir)
@@ -260,14 +296,17 @@ def cmd_restore(args: argparse.Namespace) -> int:
             _restart_steam(steam_session)
 
     print()
-    if state.get("backup_path"):
+    if _is_component(game) and state.get("component_backup"):
+        print("Creation Kit restore complete.")
+    elif state.get("backup_path"):
         print("Restore complete. Run 'Verify Integrity of Game Files' in Steam to fully")
         print("resync anything this tool didn't track (e.g. Creation Club content).")
         if state.get("recovered"):
             print("The original Steam update setting was unavailable and was left unchanged.")
     else:
-        print("Steam settings restored. Run 'Verify Integrity of Game Files' in Steam")
-        print("to reinstall the current game build.")
+        subject = "Creation Kit" if _is_component(game) else "game"
+        print(f"Steam settings restored. Verify the {subject} in Steam")
+        print(f"to reinstall the current {subject} build.")
     return 0
 
 
@@ -277,7 +316,13 @@ def cmd_downgrade(args: argparse.Namespace) -> int:
     install = steam_paths.find_game(game["appid"], game["main_exe"])
     if install is None:
         print(f"Could not find a {game['name']} install via Steam's library files.")
-        print("Make sure it's installed through Steam (not GOG/Epic; this tool is Steam-only).")
+        if _is_component(game):
+            print("Download the free Creation Kit through Steam and run it once first.")
+            if getattr(args, "return_to_menu", False):
+                input("Press Enter to return to the main menu: ")
+                return RETURN_TO_MENU
+        else:
+            print("Make sure it's installed through Steam (not GOG/Epic; this tool is Steam-only).")
         return 1
     managed_restart = getattr(args, "managed_restart", False)
     if not args.dry_run and not managed_restart and not _accept_steam_warning():
@@ -298,9 +343,21 @@ def cmd_downgrade(args: argparse.Namespace) -> int:
         print(f"Location:       {install.game_path}")
         print(f"Current version: {current}")
         print()
+        parent_version = _parent_version(game)
+        if parent_version:
+            print(f"Installed parent game: {parent_version}")
+            for item, message in game.get("unavailable_matches", {}).items():
+                if parent_version.startswith(item):
+                    print(f"Note: {message}")
+            print()
         print("Downgrade to:")
         for i, key in enumerate(keys, 1):
-            print(f"  {i}) {key}")
+            recommended = parent_version and any(
+                parent_version.startswith(item) for item in versions[key].get("recommended_for", [])
+            )
+            note = versions[key].get("note")
+            suffix = " [recommended]" if recommended else (f" - {note}" if note else "")
+            print(f"  {i}) {key}{suffix}")
         while True:
             choice = input("Pick a target version [number]: ").strip()
             try:
@@ -312,16 +369,30 @@ def cmd_downgrade(args: argparse.Namespace) -> int:
             except (ValueError, IndexError):
                 print(f"Enter a number from 1 to {len(keys)}.")
 
+    parent_version = _parent_version(game)
+    recommended_for = versions[version_key].get("recommended_for", [])
+    if _is_component(game) and parent_version and not any(
+        parent_version.startswith(item) for item in recommended_for
+    ):
+        print()
+        print(f"Warning: {version_key} is not the recommended Creation Kit for parent game {parent_version}.")
+        if not args.version and not _confirm("Continue with this advanced selection?"):
+            print("Aborted.")
+            return 1
+
     entry = versions[version_key]
     data_dir = game_data_dir(game_key)
     existing_state = swap.load_state(data_dir)
     retarget = existing_state is not None
     create_backup = not args.dry_run and not args.no_backup and not retarget
-    game_size = _directory_size(install.game_path)
+    game_size = 0 if _is_component(game) else _directory_size(install.game_path)
     if create_backup:
-        create_backup = _confirm_default_yes(
-            "Create a full game backup? Recommended, but optional if space is limited"
+        prompt = (
+            "Back up the Creation Kit files that will be replaced? Recommended"
+            if _is_component(game)
+            else "Create a full game backup? Recommended, but optional if space is limited"
         )
+        create_backup = _confirm_default_yes(prompt)
 
     download_size = int(game.get("download_size_gb", 0)) * 10**9
     backup_parent = install.game_path.parent
@@ -330,14 +401,14 @@ def cmd_downgrade(args: argparse.Namespace) -> int:
         os.stat(_existing_parent(backup_parent)).st_dev
         == os.stat(_existing_parent(download_parent)).st_dev
     )
-    if create_backup and same_device:
+    if create_backup and same_device and not _is_component(game):
         _assert_free_space(
             download_parent, download_size + game_size,
             "Depot downloads and the full backup",
         )
     else:
         _assert_free_space(download_parent, download_size, "Depot downloads")
-        if create_backup:
+        if create_backup and not _is_component(game):
             _assert_free_space(backup_parent, game_size, "The full backup")
 
     _section("Dry run" if args.dry_run else "Plan")
@@ -348,7 +419,12 @@ def cmd_downgrade(args: argparse.Namespace) -> int:
     else:
         print(f"Downgrade {game['name']} to {version_key}:")
         print(f"  Game folder: {install.game_path}")
-        if retarget:
+        if retarget and _is_component(game):
+            if existing_state.get("component_backup"):
+                print("  Original Creation Kit file backup retained for restore")
+            else:
+                print("  No original CK file backup is available; Steam verification may be required")
+        elif retarget:
             existing_backup = existing_state.get("backup_path")
             if existing_backup and Path(existing_backup).is_dir():
                 print(f"  Original backup retained at: {existing_backup}")
@@ -356,13 +432,17 @@ def cmd_downgrade(args: argparse.Namespace) -> int:
             else:
                 print("  No original backup is available; applying over the current files")
                 print("  Steam verification may be required if versions contain different files")
+        elif create_backup and _is_component(game):
+            print("  Files replaced by the downgrade backed up under the tool's state directory")
+            print("  The parent game files are not backed up or changed as a unit")
         elif create_backup:
             backup_path = swap.backup_path_for(install.game_path, install.version, install.buildid)
             print(f"  Current install backed up to: {backup_path}")
             print(f"  Approximate backup size: {game_size / 10**9:.1f} GB")
             print("  The backup remains until restored or deleted by you")
         else:
-            print("  Full backup skipped; Steam must redownload the game to recover it")
+            subject = "Creation Kit" if _is_component(game) else "game"
+            print(f"  Backup skipped; Steam must redownload the {subject} to recover it")
         print(f"  Steam auto-update for {game['name']} set to 'only update when launched'")
     if not _confirm("Proceed?"):
         print("Aborted.")
@@ -372,7 +452,7 @@ def cmd_downgrade(args: argparse.Namespace) -> int:
     _test_directory_write(_existing_parent(download_parent))
     if not args.dry_run:
         _test_directory_write(install.game_path)
-        if create_backup:
+        if create_backup and not _is_component(game):
             _test_directory_write(install.game_path.parent)
         for localconfig in steam_paths.find_userdata_localconfigs():
             _test_file_write(localconfig)
@@ -426,11 +506,15 @@ def cmd_downgrade(args: argparse.Namespace) -> int:
         if retarget and existing_state.get("backup_path") and Path(existing_state["backup_path"]).is_dir():
             print("Resetting the game from the original backup...")
             swap.reset_game_from_backup(install.game_path, Path(existing_state["backup_path"]))
+        elif create_backup and _is_component(game):
+            print("Backing up the Creation Kit files being replaced and copying downgraded files in...")
         elif create_backup:
             print("Backing up the current install and copying downgraded files in...")
         else:
-            print("Copying downgraded files in without a full backup...")
-        backup_path = swap.apply_downgrade(
+            backup_kind = "Creation Kit file backup" if _is_component(game) else "full backup"
+            print(f"Copying downgraded files in without a {backup_kind}...")
+        apply = swap.apply_component_downgrade if _is_component(game) else swap.apply_downgrade
+        backup_path = apply(
             install.game_path, content_dir, version_key, install.version, install.buildid, data_dir,
             prior_update_behavior, install.acf_path, prior_acf_mode,
             create_backup=create_backup,
@@ -438,7 +522,8 @@ def cmd_downgrade(args: argparse.Namespace) -> int:
             localconfigs=localconfig_states,
         )
         if backup_path is not None:
-            print(f"Backup saved to {backup_path}")
+            label = "Creation Kit file backup" if _is_component(game) else "Backup"
+            print(f"{label} saved to {backup_path}")
         if localconfigs:
             print(f"Set {game['name']} to 'only update when launched' in Steam.")
 
@@ -451,21 +536,25 @@ def cmd_downgrade(args: argparse.Namespace) -> int:
 
         shutil.rmtree(content_dir, ignore_errors=True)
 
-        content_catalog = steam_paths.find_content_catalog(
-            install.library_root, game["appid"], install.game_path.name
-        )
-        if content_catalog.is_file():
-            content_catalog.unlink()
-            print("Removed stale Creation Club content catalog (ContentCatalog.txt);")
-            print("Steam regenerates it on next launch.")
+        if not _is_component(game):
+            content_catalog = steam_paths.find_content_catalog(
+                install.library_root, game["appid"], install.game_path.name
+            )
+            if content_catalog.is_file():
+                content_catalog.unlink()
+                print("Removed stale Creation Club content catalog (ContentCatalog.txt);")
+                print("Steam regenerates it on next launch.")
     finally:
         if steam_session is not None:
             _restart_steam(steam_session)
 
     _section("Done")
     print(f"{game['name']} is now on {version_key}.")
-    print(f"Do not launch vanilla {game['name']} through Steam or click Update.")
-    print("Launch your modded setup through its MO2 shortcut instead.")
+    if _is_component(game):
+        print("Keep this Creation Kit's Steam updates disabled, or Steam may replace it.")
+    else:
+        print(f"Do not launch vanilla {game['name']} through Steam or click Update.")
+        print("Launch your modded setup through its MO2 shortcut instead.")
     return 0
 
 
@@ -476,16 +565,25 @@ def cmd_interactive(_args: argparse.Namespace) -> int:
         for index, key in enumerate(keys, 1):
             print(f"  {index}) Downgrade {load_game(key)['name']}")
         restore_choice = len(keys) + 1
+        exit_choice = len(keys) + 2
         print(f"  {restore_choice}) Restore a previous downgrade")
+        print(f"  {exit_choice}) Exit")
         choice = input("Pick an option [number]: ").strip()
         try:
             index = int(choice) - 1
         except ValueError:
             index = -1
         if 0 <= index < len(keys):
-            return cmd_downgrade(argparse.Namespace(
+            result = cmd_downgrade(argparse.Namespace(
                 game=keys[index], version=None, dry_run=False, no_backup=False,
+                return_to_menu=True,
             ))
+            if result == RETURN_TO_MENU:
+                print()
+                continue
+            input("Press Enter to return to the main menu: ")
+            print()
+            continue
         if index == len(keys):
             available = []
             for key in keys:
@@ -511,14 +609,19 @@ def cmd_interactive(_args: argparse.Namespace) -> int:
                         break
                     except (ValueError, IndexError):
                         print(f"Enter a number from 1 to {len(available)}.")
-            return cmd_restore(argparse.Namespace(game=restore_key))
-        print(f"Enter a number from 1 to {restore_choice}.")
+            cmd_restore(argparse.Namespace(game=restore_key))
+            input("Press Enter to return to the main menu: ")
+            print()
+            continue
+        if index == len(keys) + 1:
+            return 0
+        print(f"Enter a number from 1 to {exit_choice}.")
 
 
 def _add_game_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--game", default=None,
-        help="Which game to target (asked if omitted). Run list-games to see options.",
+        help="Which game or Creation Kit to target (asked if omitted). Run list-games to see options.",
     )
 
 

@@ -1,6 +1,6 @@
 # Jackify Game Downgrader
 
-Downgrades supported Steam installs of Skyrim Special Edition or Fallout 4 to older, script-extender-compatible builds. Linux and Windows downloads are available. Game files come directly from Steam through Valve's SteamCMD; they are not included with this tool.
+Downgrades supported Steam installs of Skyrim Special Edition, Fallout 4, and their Creation Kits to older modding-compatible builds. Linux and Windows downloads are available. Files come directly from Steam through Valve's SteamCMD; they are not included with this tool.
 
 ## Quick navigation
 
@@ -28,6 +28,8 @@ You will need:
 - More free space if you choose the optional full backup. The tool shows its approximate size before starting.
 - Windows 10 or 11, or Python 3.10 or newer on Linux.
 
+Creation Kit downgrades are separate and optional. The free Creation Kit must first be downloaded through Steam and run once. If an interactive CK selection cannot find it, acknowledge the message to return to the main menu and choose again. Choosing a game downgrade never changes or protects its Creation Kit. Bethesda supports the Creation Kits themselves on Windows; downloading their files on Linux is provided for Wine/Proton and modlist workflows.
+
 The examples below downgrade Skyrim Special Edition to `1.6.1170`. Paths, sizes, usernames, timings, and progress values will differ on your computer.
 
 ## Windows walkthrough
@@ -42,7 +44,9 @@ Choose Skyrim Special Edition by entering `2`:
 What would you like to do?
   1) Downgrade Fallout 4
   2) Downgrade Skyrim Special Edition
-  3) Restore a previous downgrade
+  3) Downgrade Fallout 4: Creation Kit
+  4) Downgrade Skyrim Special Edition: Creation Kit
+  5) Restore a previous downgrade
 Pick an option [number]: 2
 ```
 
@@ -173,7 +177,9 @@ Choose Skyrim Special Edition by entering `2`:
 What would you like to do?
   1) Downgrade Fallout 4
   2) Downgrade Skyrim Special Edition
-  3) Restore a previous downgrade
+  3) Downgrade Fallout 4: Creation Kit
+  4) Downgrade Skyrim Special Edition: Creation Kit
+  5) Restore a previous downgrade
 Pick an option [number]: 2
 ```
 
@@ -270,7 +276,7 @@ On Linux, Steam may make its game manifest writable again after an MO2/Proton se
 
 ## Restoring or changing version
 
-Run the tool again and choose option `3`, **Restore a previous downgrade**.
+Run the tool again and choose option `5`, **Restore a previous downgrade**.
 
 If you made a backup, restore puts it back and returns the Steam settings changed by the tool to their previous values. If you skipped the backup, it restores those settings and tells you to use Steam's **Verify integrity of game files** option to download the current game again.
 
@@ -279,6 +285,8 @@ Restore records are kept in your user profile so they survive tool updates and n
 To change from one older version to another, run the downgrade again and select the new target. The original pre-downgrade backup is retained and remains the version used by restore.
 
 Backups are never deleted automatically. Remove one yourself only when you are certain you no longer need it.
+
+Creation Kit restore is tracked separately from game restore. A CK downgrade backs up only the CK files it replaces under the tool's persistent state directory; it does not duplicate, restore, or remove the parent game as a unit. If you skip that small backup, restore returns the Steam settings and directs you to verify the Creation Kit through Steam.
 
 ## Other commands
 
@@ -295,6 +303,8 @@ Windows PowerShell:
 .\JackifyGameDowngrader.ps1 -Game skyrim_se -ListVersions
 .\JackifyGameDowngrader.ps1 -Game fallout4 -Restore
 .\JackifyGameDowngrader.ps1 -Game fallout4 --managed-restart
+.\JackifyGameDowngrader.ps1 -Game fallout4_ck -Version 1.10.162
+.\JackifyGameDowngrader.ps1 -Game skyrim_se_ck -Version 1.6.1130
 ```
 
 Linux:
@@ -308,6 +318,8 @@ Linux:
 ./jackify-game-downgrader list-versions --game skyrim_se
 ./jackify-game-downgrader restore --game fallout4
 ./jackify-game-downgrader --game fallout4 --managed-restart
+./jackify-game-downgrader --game fallout4_ck --version 1.10.162
+./jackify-game-downgrader --game skyrim_se_ck --version 1.6.1130
 ```
 
 Dry run downloads and checks the real depot data but does not modify the game, Steam settings, app manifest, or content catalog.
@@ -318,6 +330,10 @@ Dry run downloads and checks the real depot data but does not modify the game, S
 
 - Skyrim Special Edition: 1.6.1170, 1.6.640, 1.5.97
 - Fallout 4: 1.10.163
+- Skyrim Special Edition Creation Kit: 1.6.1130 (recommended for game 1.6.1170), 1.6.438 (recommended for game 1.6.640)
+- Fallout 4 Creation Kit: 1.10.162 (recommended for game 1.10.163)
+
+Skyrim 1.5.97's matching CK 1.5.73 is not available as a Steam depot and requires a separate binary patcher, so it is not an automatic target. The tool shows the installed parent-game version, marks its matching CK target as recommended, and warns before an interactive mismatched selection. An explicit command-line version remains available for advanced authoring setups.
 
 ## What the tool changes
 
@@ -331,6 +347,8 @@ Before continuing, the tool shows the game path, backup choice, and required dis
 - On Windows, marks the app manifest read-only.
 - Removes stale `ContentCatalog.txt` data that can crash an older game build.
 - Records the backup and prior Steam settings for restore.
+
+For a Creation Kit operation, these changes apply to the CK app ID and manifest only. The tool uses a file-level CK backup because Steam installs each CK inside its parent game's directory.
 
 On Linux, do not launch the vanilla game through Steam or accept an update. Launch the modded setup through its MO2 shortcut instead.
 
@@ -347,7 +365,7 @@ Depot downloads are removed after success and retained after failure so the oper
 Build local release files in the workspace-level `../dist/` directory:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-release.ps1 -Version 0.2.3
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-release.ps1 -Version 0.2.5
 ```
 
 ## License

@@ -1,0 +1,31 @@
+{
+  "name": "Skyrim Special Edition: Creation Kit",
+  "component": "creation_kit",
+  "appid": 1946180,
+  "parent_appid": 489830,
+  "parent_main_exe": "SkyrimSE.exe",
+  "main_exe": "CreationKit.exe",
+  "download_size_gb": 1,
+  "unavailable_matches": {
+    "1.5.97": "The matching Creation Kit 1.5.73 is not available as a Steam depot and needs a separate binary patcher."
+  },
+  "depots": [1946182, 1946183],
+  "versions": {
+    "1.6.438": {
+      "recommended_for": ["1.6.640"],
+      "note": "Recommended for pre-Creations Skyrim 1.6.640",
+      "manifests": {
+        "1946182": "5099162879680505807",
+        "1946183": "1633303557398589581"
+      }
+    },
+    "1.6.1130": {
+      "recommended_for": ["1.6.1170"],
+      "note": "Recommended for Skyrim 1.6.1130 and 1.6.1170",
+      "manifests": {
+        "1946182": "926444740758492387",
+        "1946183": "2725999750516785042"
+      }
+    }
+  }
+}

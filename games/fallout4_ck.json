@@ -1,0 +1,20 @@
+{
+  "name": "Fallout 4: Creation Kit",
+  "component": "creation_kit",
+  "appid": 1946160,
+  "parent_appid": 377160,
+  "parent_main_exe": "Fallout4.exe",
+  "main_exe": "CreationKit.exe",
+  "download_size_gb": 1,
+  "depots": [1946161, 1946162],
+  "versions": {
+    "1.10.162": {
+      "recommended_for": ["1.10.163"],
+      "note": "Recommended for Fallout 4 1.10.163 and its original BA2 format",
+      "manifests": {
+        "1946161": "6928748513006443409",
+        "1946162": "3951536123944501689"
+      }
+    }
+  }
+}

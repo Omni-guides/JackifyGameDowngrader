@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import tempfile
 import time
 from pathlib import Path
 
@@ -23,6 +24,99 @@ def preview_downgrade(game_path: Path, content_dir: Path) -> tuple[list[str], li
     return overwrite, new
 
 
+def apply_component_downgrade(
+    install_path: Path,
+    content_dir: Path,
+    version: str,
+    prior_version: str | None,
+    prior_buildid: str | None,
+    data_dir: Path,
+    prior_update_behavior: str | None = None,
+    acf_path: Path | None = None,
+    prior_acf_mode: int | None = None,
+    create_backup: bool = True,
+    existing_state: dict | None = None,
+    localconfigs: list[dict] | None = None,
+) -> Path | None:
+    """Apply a shared-directory component without backing up its parent game."""
+    existing_records = (existing_state.get("component_backup") or []) if existing_state else []
+    if isinstance(existing_records, dict):
+        existing_records = [existing_records]
+    backup_path = data_dir / "file-backup" if create_backup or existing_records else None
+    state = dict(existing_state) if existing_state else {
+        "game_path": str(install_path),
+        "backup_path": None,
+        "component_backup": [],
+        "prior_version": prior_version,
+        "prior_buildid": prior_buildid,
+        "prior_update_behavior": prior_update_behavior,
+        "acf_path": str(acf_path) if acf_path else None,
+        "prior_acf_mode": prior_acf_mode,
+        "localconfigs": localconfigs or [],
+    }
+    state["version"] = version
+    state["timestamp"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    records = list(existing_records)
+    recorded = {item["path"] for item in records}
+    state["component_backup"] = records
+    # Steam protection is applied before this function is called. Persist its
+    # prior values before file backup work so a copy failure remains restorable.
+    save_state(data_dir, state)
+
+    if backup_path is not None:
+        with tempfile.TemporaryDirectory(prefix="file-backup-staging-", dir=data_dir) as staging:
+            staging_path = Path(staging)
+            for _src, rel in _content_files(content_dir):
+                rel_text = str(rel)
+                if rel_text in recorded:
+                    continue
+                current = install_path / rel
+                existed = current.is_file()
+                records.append({"path": rel_text, "existed": existed})
+                recorded.add(rel_text)
+                if existed:
+                    staged = staging_path / rel
+                    staged.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(current, staged)
+            backup_path.mkdir(parents=True, exist_ok=True)
+            for staged in (path for path in staging_path.rglob("*") if path.is_file()):
+                saved = backup_path / staged.relative_to(staging_path)
+                saved.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(staged, saved)
+    state["component_backup"] = records
+    save_state(data_dir, state)
+
+    for src, rel in _content_files(content_dir):
+        dest = install_path / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dest)
+    return backup_path
+
+
+def restore_component_from_state(data_dir: Path) -> None:
+    state = load_state(data_dir)
+    if state is None:
+        raise RuntimeError("No downgrade state found; nothing to restore.")
+    install_path = Path(state["game_path"])
+    backup_path = data_dir / "file-backup"
+    records = state.get("component_backup", [])
+    if not records:
+        raise RuntimeError("No Creation Kit file backup was made; use Steam Verify Integrity instead.")
+    for item in records:
+        rel = Path(item["path"])
+        target = install_path / rel
+        if item["existed"]:
+            source = backup_path / rel
+            if not source.is_file():
+                raise RuntimeError(f"Component backup file is missing: {source}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+        elif target.is_file():
+            target.unlink()
+    shutil.rmtree(backup_path, ignore_errors=True)
+    clear_state(data_dir)
+
+
 def backup_path_for(game_path: Path, prior_version: str | None, prior_buildid: str | None) -> Path:
     label = prior_version or (f"build {prior_buildid}" if prior_buildid else "backup")
     candidate = game_path.parent / f"{game_path.name} ({label})"
@@ -31,6 +125,16 @@ def backup_path_for(game_path: Path, prior_version: str | None, prior_buildid: s
         candidate = game_path.parent / f"{game_path.name} ({label}) ({n})"
         n += 1
     return candidate
+
+
+def _create_full_backup(game_path: Path, backup_path: Path) -> None:
+    staging = game_path.parent / f".jgd-backup-staging-{time.time_ns()}"
+    try:
+        shutil.copytree(game_path, staging)
+        staging.rename(backup_path)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
 
 
 def reset_game_from_backup(game_path: Path, backup_path: Path) -> None:
@@ -71,12 +175,11 @@ def apply_downgrade(
         state["version"] = version
         state["timestamp"] = time.strftime("%Y-%m-%d %H:%M:%S")
     else:
-        backup_path = backup_path_for(game_path, prior_version, prior_buildid) if create_backup else None
-        if backup_path is not None:
-            shutil.copytree(game_path, backup_path)
+        backup_path = None
+        intended_backup_path = backup_path_for(game_path, prior_version, prior_buildid) if create_backup else None
         state = {
             "game_path": str(game_path),
-            "backup_path": str(backup_path) if backup_path else None,
+            "backup_path": None,
             "version": version,
             "prior_version": prior_version,
             "prior_buildid": prior_buildid,
@@ -86,6 +189,12 @@ def apply_downgrade(
             "localconfigs": localconfigs or [],
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
+        # Save a restorable settings-only state before a potentially large copy.
+        save_state(data_dir, state)
+        backup_path = intended_backup_path
+        if backup_path is not None:
+            _create_full_backup(game_path, backup_path)
+            state["backup_path"] = str(backup_path)
     save_state(data_dir, state)
     if backup_path is not None:
         (backup_path / BACKUP_STATE).write_text(json.dumps(state, indent=2))

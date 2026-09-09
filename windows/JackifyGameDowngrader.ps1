@@ -32,10 +32,26 @@ function Get-GameDefinitions {
         throw "Game definitions were not found at $path"
     }
     $result = [ordered]@{}
-    foreach ($file in Get-ChildItem -LiteralPath $path -Filter '*.json' -File | Sort-Object Name) {
-        $result[$file.BaseName] = Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json
+    $items = foreach ($file in Get-ChildItem -LiteralPath $path -Filter '*.json' -File) {
+        $definition = Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json
+        [pscustomobject]@{ Key = $file.BaseName; Definition = $definition; IsComponent = [int](Test-CreationKit $definition) }
+    }
+    foreach ($item in @($items | Sort-Object IsComponent, Key)) {
+        $result[$item.Key] = $item.Definition
     }
     return $result
+}
+
+function Test-CreationKit($Definition) {
+    return ($Definition.PSObject.Properties['component'] -and $Definition.component -eq 'creation_kit')
+}
+
+function Get-ParentGameVersion([string[]]$Libraries, $Definition) {
+    if (-not (Test-CreationKit $Definition)) { return $null }
+    $parent = [pscustomobject]@{ appid = $Definition.parent_appid; main_exe = $Definition.parent_main_exe }
+    $install = Find-GameInstall $Libraries $parent
+    if ($install) { return $install.Version }
+    return $null
 }
 
 function Select-Game([Collections.IDictionary]$Games, [string]$Key) {
@@ -63,15 +79,18 @@ function Select-InteractiveAction([Collections.IDictionary]$Games) {
         Write-Host "  $($i + 1)) Downgrade $($Games[$keys[$i]].name)"
     }
     $restoreChoice = $keys.Count + 1
+    $exitChoice = $keys.Count + 2
     Write-Host "  $restoreChoice) Restore a previous downgrade"
+    Write-Host "  $exitChoice) Exit"
     while ($true) {
         $choice = 0
         if ([int]::TryParse((Read-Host 'Pick an option [number]'), [ref]$choice) -and
-            $choice -ge 1 -and $choice -le $restoreChoice) {
+            $choice -ge 1 -and $choice -le $exitChoice) {
             if ($choice -eq $restoreChoice) { return [pscustomobject]@{ Action = 'restore'; Game = $null } }
+            if ($choice -eq $exitChoice) { return [pscustomobject]@{ Action = 'exit'; Game = $null } }
             return [pscustomobject]@{ Action = 'downgrade'; Game = $keys[$choice - 1] }
         }
-        Write-Host "Enter a number from 1 to $restoreChoice." -ForegroundColor Yellow
+        Write-Host "Enter a number from 1 to $exitChoice." -ForegroundColor Yellow
     }
 }
 
@@ -91,14 +110,24 @@ function Select-RestoreGame([Collections.IDictionary]$Games) {
     return (Select-Game $available '')
 }
 
-function Select-Version($Definition, [string]$Requested) {
+function Select-Version($Definition, [string]$Requested, [string]$ParentVersion = '') {
     $versions = @($Definition.versions.PSObject.Properties.Name | Sort-Object { [version]$_ } -Descending)
     if ($Requested) {
         if ($versions -notcontains $Requested) { throw "Unknown version '$Requested'." }
         return $Requested
     }
     Write-Host 'Downgrade to:'
-    for ($i = 0; $i -lt $versions.Count; $i++) { Write-Host "  $($i + 1)) $($versions[$i])" }
+    for ($i = 0; $i -lt $versions.Count; $i++) {
+        $entry = $Definition.versions.PSObject.Properties[$versions[$i]].Value
+        $recommended = $false
+        if ($ParentVersion -and $entry.PSObject.Properties['recommended_for']) {
+            foreach ($item in @($entry.recommended_for)) {
+                if ($ParentVersion.StartsWith([string]$item, [StringComparison]::OrdinalIgnoreCase)) { $recommended = $true }
+            }
+        }
+        $suffix = if ($recommended) { ' [recommended]' } elseif ($entry.PSObject.Properties['note']) { " - $($entry.note)" } else { '' }
+        Write-Host "  $($i + 1)) $($versions[$i])$suffix"
+    }
     while ($true) {
         $choice = 0
         if ([int]::TryParse((Read-Host 'Pick a target version [number]'), [ref]$choice) -and
@@ -437,6 +466,27 @@ function Copy-Tree([string]$Source, [string]$Destination) {
     }
 }
 
+function New-FullBackup([string]$Source, [string]$Destination) {
+    $staging = Join-Path (Split-Path -Parent $Destination) ('.jgd-backup-staging-' + [guid]::NewGuid().ToString('N'))
+    try {
+        Copy-Tree $Source $staging
+        [IO.Directory]::Move($staging, $Destination)
+    }
+    finally {
+        if (Test-Path -LiteralPath $staging -PathType Container) { Remove-Item -LiteralPath $staging -Recurse -Force }
+    }
+}
+
+function Get-UsableFullBackupPath($State) {
+    if ($null -eq $State) { return $null }
+    $path = [string]$State.backup_path
+    if (-not $path) { return $null }
+    if (Test-Path -LiteralPath $path -PathType Container) { return $path }
+    if ($State -is [Collections.IDictionary]) { $State['backup_path'] = $null }
+    else { $State.backup_path = $null }
+    return $null
+}
+
 function Reset-GameFromBackup([string]$GamePath, [string]$BackupPath) {
     if (-not (Test-Path -LiteralPath $BackupPath -PathType Container)) { throw "Backup not found: $BackupPath" }
     Remove-Item -LiteralPath $GamePath -Recurse -Force
@@ -466,6 +516,79 @@ function Install-DepotFiles([string]$ContentPath, [string]$GamePath) {
         [void](New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force)
         Copy-Item -LiteralPath $file.Source -Destination $target -Force
     }
+}
+
+function Get-ComponentBackupPath([string]$GameKey) {
+    return (Join-Path $StateRoot "$GameKey\file-backup")
+}
+
+function Get-ComponentRecords($State) {
+    if ($null -eq $State) { return }
+    $value = $null
+    if ($State -is [Collections.IDictionary]) {
+        if ($State.Contains('component_backup')) { $value = $State['component_backup'] }
+    }
+    elseif ($State.PSObject.Properties['component_backup']) {
+        $value = $State.component_backup
+    }
+    foreach ($item in @($value)) {
+        if ($null -ne $item) { $item }
+    }
+}
+
+function Backup-ComponentFiles([string]$GameKey, [string]$ContentPath, [string]$GamePath, $ExistingRecords) {
+    $backupPath = Get-ComponentBackupPath $GameKey
+    $stagingPath = Join-Path (Split-Path -Parent $backupPath) ('file-backup-staging-' + [guid]::NewGuid().ToString('N'))
+    $records = [Collections.ArrayList]::new()
+    $recorded = @{}
+    foreach ($item in @($ExistingRecords)) {
+        if ($null -eq $item) { continue }
+        [void]$records.Add($item)
+        $recorded[[string]$item.path] = $true
+    }
+    try {
+        [void](New-Item -ItemType Directory -Path $stagingPath -Force)
+        foreach ($file in Get-DepotFiles $ContentPath) {
+            if ($recorded.ContainsKey($file.Relative)) { continue }
+            $target = Join-Path $GamePath $file.Relative
+            $existed = Test-Path -LiteralPath $target -PathType Leaf
+            [void]$records.Add([pscustomobject]@{ path = $file.Relative; existed = $existed })
+            $recorded[$file.Relative] = $true
+            if ($existed) {
+                $staged = Join-Path $stagingPath $file.Relative
+                [void](New-Item -ItemType Directory -Path (Split-Path -Parent $staged) -Force)
+                Copy-Item -LiteralPath $target -Destination $staged -Force
+            }
+        }
+        [void](New-Item -ItemType Directory -Path $backupPath -Force)
+        foreach ($file in Get-ChildItem -LiteralPath $stagingPath -File -Recurse -Force) {
+            $relative = $file.FullName.Substring($stagingPath.Length).TrimStart([char[]]'\/')
+            $saved = Join-Path $backupPath $relative
+            [void](New-Item -ItemType Directory -Path (Split-Path -Parent $saved) -Force)
+            Copy-Item -LiteralPath $file.FullName -Destination $saved -Force
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $stagingPath -PathType Container) { Remove-Item -LiteralPath $stagingPath -Recurse -Force }
+    }
+    return @($records)
+}
+
+function Restore-ComponentFiles([string]$GameKey, [string]$GamePath, $Records) {
+    $backupPath = Get-ComponentBackupPath $GameKey
+    foreach ($item in @($Records)) {
+        $target = Join-Path $GamePath ([string]$item.path)
+        if ([bool]$item.existed) {
+            $saved = Join-Path $backupPath ([string]$item.path)
+            if (-not (Test-Path -LiteralPath $saved -PathType Leaf)) { throw "Component backup file is missing: $saved" }
+            [void](New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force)
+            Copy-Item -LiteralPath $saved -Destination $target -Force
+        }
+        elseif (Test-Path -LiteralPath $target -PathType Leaf) {
+            Remove-Item -LiteralPath $target -Force
+        }
+    }
+    if (Test-Path -LiteralPath $backupPath -PathType Container) { Remove-Item -LiteralPath $backupPath -Recurse -Force }
 }
 
 function Get-DepotPreview([string]$ContentPath, [string]$GamePath) {
@@ -551,12 +674,13 @@ function Restore-ManifestAttribute([string]$Path, [bool]$WasReadOnly) {
 }
 
 function Get-ContentCatalogPath($Definition) {
+    if (-not $Definition.PSObject.Properties['localappdata_dir']) { return $null }
     return (Join-Path $env:LOCALAPPDATA "$($Definition.localappdata_dir)\ContentCatalog.txt")
 }
 
 function Remove-ContentCatalog($Definition) {
     $path = Get-ContentCatalogPath $Definition
-    if (Test-Path -LiteralPath $path -PathType Leaf) {
+    if ($path -and (Test-Path -LiteralPath $path -PathType Leaf)) {
         Remove-Item -LiteralPath $path -Force
         Write-Host "Removed stale Creation Club content catalog: $path"
     }
@@ -582,6 +706,7 @@ function Load-State([string]$GameKey) {
 }
 
 function Get-BackupCandidates($Install, $Definition) {
+    if (Test-CreationKit $Definition) { return @() }
     if (-not $Install) { return @() }
     $parent = Split-Path -Parent $Install.GamePath
     $prefix = (Split-Path -Leaf $Install.GamePath) + ' ('
@@ -592,6 +717,7 @@ function Get-BackupCandidates($Install, $Definition) {
 }
 
 function Recover-State([string]$GameKey, $Definition, [string[]]$SteamRoots) {
+    if (Test-CreationKit $Definition) { return $null }
     $install = Find-GameInstall @(Get-LibraryRoots $SteamRoots) $Definition
     $backups = @(Get-BackupCandidates $install $Definition)
     if (-not $backups) { return $null }
@@ -639,15 +765,23 @@ function Confirm-DefaultYes([string]$Prompt) {
     return ($answer -eq '' -or $answer -eq 'y' -or $answer -eq 'yes')
 }
 
+function Wait-ForMainMenu {
+    Write-Host 'Press any key to return to the main menu, or Esc to exit.' -ForegroundColor Cyan
+    $key = [Console]::ReadKey($true)
+    return ($key.Key -ne [ConsoleKey]::Escape)
+}
+
 function Invoke-Restore([string]$GameKey, $Definition, [string[]]$SteamRoots) {
     $state = Load-State $GameKey
     if (-not $state) { $state = Recover-State $GameKey $Definition $SteamRoots }
     if (-not $state) { throw "No downgrade state or backup folder was found for $($Definition.name)." }
     if (-not $ManagedRestart -and -not (Confirm-SteamRestartWarning)) { Write-Host 'Aborted.'; return }
     Write-Host "Game folder: $($state.game_path)"
-    if ($state.backup_path) { Write-Host "Backup:      $($state.backup_path)" }
+    $savedComponentRecords = @(Get-ComponentRecords $state)
+    if ((Test-CreationKit $Definition) -and $savedComponentRecords.Count -gt 0) { Write-Host 'Backup:      Creation Kit files only; the parent game is untouched' }
+    elseif ($state.backup_path) { Write-Host "Backup:      $($state.backup_path)" }
     else { Write-Host 'Backup:      none; Steam verification will be required' }
-    if (-not (Confirm-Action 'Restore this backup?')) { Write-Host 'Aborted.'; return }
+    if (-not (Confirm-Action 'Restore this downgrade?')) { Write-Host 'Aborted.'; return }
     $gameProcess = [IO.Path]::GetFileNameWithoutExtension($Definition.main_exe)
     $steamWasRunning = $false
     if (-not $ManagedRestart) {
@@ -656,9 +790,18 @@ function Invoke-Restore([string]$GameKey, $Definition, [string[]]$SteamRoots) {
         catch { Start-SteamAgain $SteamRoots $steamWasRunning; throw }
     }
     $gamePath = [string]$state.game_path
-    $backupPath = [string]$state.backup_path
+    $recordedBackupPath = [string]$state.backup_path
+    $backupPath = if (Test-CreationKit $Definition) { $recordedBackupPath } else { Get-UsableFullBackupPath $state }
+    if ($recordedBackupPath -and -not $backupPath) {
+        Write-Host "The recorded backup is missing: $recordedBackupPath" -ForegroundColor Yellow
+        Write-Host 'Steam settings will still be restored; verify the game through Steam to recover its files.' -ForegroundColor Yellow
+    }
     try {
-        if ($backupPath) {
+        $componentRecords = @(Get-ComponentRecords $state)
+        if ((Test-CreationKit $Definition) -and $componentRecords.Count -gt 0) {
+            Restore-ComponentFiles $GameKey $gamePath $componentRecords
+        }
+        elseif ($backupPath) {
             if (-not (Test-Path -LiteralPath $backupPath -PathType Container)) { throw "Backup not found: $backupPath" }
             $temporary = "$gamePath.jgd-restore-$([guid]::NewGuid().ToString('N'))"
             [IO.Directory]::Move($gamePath, $temporary)
@@ -680,37 +823,77 @@ function Invoke-Restore([string]$GameKey, $Definition, [string[]]$SteamRoots) {
     finally {
         if (-not $ManagedRestart) { Start-SteamAgain $SteamRoots $steamWasRunning }
     }
-    if ($backupPath) { Write-Host 'Restore complete.' -ForegroundColor Green }
+    if ((Test-CreationKit $Definition) -and $componentRecords.Count -gt 0) { Write-Host 'Creation Kit restore complete.' -ForegroundColor Green }
+    elseif ($backupPath) { Write-Host 'Restore complete.' -ForegroundColor Green }
     else {
-        Write-Host 'Steam settings restored. Use Steam Verify Integrity of Game Files to reinstall the current game build.' -ForegroundColor Green
+        $subject = if (Test-CreationKit $Definition) { 'Creation Kit' } else { 'game' }
+        Write-Host "Steam settings restored. Verify the $subject in Steam to reinstall its current build." -ForegroundColor Green
     }
     if ($state.PSObject.Properties['recovered']) {
         Write-Host 'The original Steam update setting was unavailable and was left unchanged.' -ForegroundColor Yellow
     }
 }
 
-function Invoke-Downgrade([string]$GameKey, $Definition, [string]$TargetVersion, [switch]$PreviewOnly, [switch]$NoBackup) {
+function Invoke-Downgrade([string]$GameKey, $Definition, [string]$TargetVersion, [switch]$PreviewOnly, [switch]$NoBackup, [switch]$ReturnToMenu) {
     $steamRoots = @(Get-SteamRoots)
     if (-not $steamRoots) { throw 'Steam was not found.' }
     $libraries = @(Get-LibraryRoots $steamRoots)
     $install = Find-GameInstall $libraries $Definition
-    if (-not $install) { throw "$($Definition.name) was not found in a Steam library." }
+    if (-not $install) {
+        if ((Test-CreationKit $Definition) -and $ReturnToMenu) {
+            Write-Host "$($Definition.name) was not found in a Steam library." -ForegroundColor Yellow
+            Write-Host 'Download the free Creation Kit through Steam and run it once first.'
+            if (Wait-ForMainMenu) { $script:MenuReturnRequested = $true }
+            else { $script:MenuExitRequested = $true }
+            return
+        }
+        if (Test-CreationKit $Definition) { throw "$($Definition.name) was not found. Download the free Creation Kit through Steam and run it once first." }
+        throw "$($Definition.name) was not found in a Steam library."
+    }
     if (-not $PreviewOnly -and -not $ManagedRestart -and -not (Confirm-SteamRestartWarning)) { Write-Host 'Aborted.'; return }
     $existingState = Load-State $GameKey
     $retarget = ($null -ne $existingState)
-    $target = Select-Version $Definition $TargetVersion
+    $retargetBackupPath = $null
+    if ($retarget -and -not (Test-CreationKit $Definition)) {
+        $retargetBackupPath = Get-UsableFullBackupPath $existingState
+    }
+    $parentVersion = Get-ParentGameVersion $libraries $Definition
+    if ($parentVersion) {
+        Write-Host "Installed parent game: $parentVersion" -ForegroundColor Cyan
+        if ($Definition.PSObject.Properties['unavailable_matches']) {
+            foreach ($item in $Definition.unavailable_matches.PSObject.Properties) {
+                if ($parentVersion.StartsWith($item.Name, [StringComparison]::OrdinalIgnoreCase)) { Write-Host "Note: $($item.Value)" -ForegroundColor Yellow }
+            }
+        }
+    }
+    $target = Select-Version $Definition $TargetVersion $parentVersion
     $entry = $Definition.versions.PSObject.Properties[$target].Value
+    if ((Test-CreationKit $Definition) -and $parentVersion -and $entry.PSObject.Properties['recommended_for']) {
+        $matchesParent = $false
+        foreach ($item in @($entry.recommended_for)) {
+            if ($parentVersion.StartsWith([string]$item, [StringComparison]::OrdinalIgnoreCase)) { $matchesParent = $true }
+        }
+        if (-not $matchesParent) {
+            Write-Host "Creation Kit $target is not the recommended version for parent game $parentVersion." -ForegroundColor Yellow
+            if (-not $TargetVersion -and -not (Confirm-Action 'Continue with this advanced selection?')) { Write-Host 'Aborted.'; return }
+        }
+    }
     $backupPath = Get-BackupPath $install.GamePath $install.Version $install.BuildId
-    $gameSize = Get-DirectorySize $install.GamePath
+    $gameSize = if (Test-CreationKit $Definition) { 0 } else { Get-DirectorySize $install.GamePath }
     $createBackup = (-not $PreviewOnly -and -not $NoBackup -and -not $retarget)
     Write-Host ''
     Write-Host "$($Definition.name): $($install.Version) -> $target" -ForegroundColor Cyan
     Write-Host "Game folder: $($install.GamePath)"
     if ($PreviewOnly) { Write-Host 'Dry run: no game or Steam settings will be changed.' }
     else {
-        if ($retarget) {
-            if ($existingState.backup_path -and (Test-Path -LiteralPath $existingState.backup_path -PathType Container)) {
-                Write-Host "Original backup retained at: $($existingState.backup_path)"
+        if ($retarget -and (Test-CreationKit $Definition)) {
+            $retargetRecords = @(Get-ComponentRecords $existingState)
+            if ($retargetRecords.Count -gt 0) { Write-Host 'Original Creation Kit file backup retained for restore.' }
+            else { Write-Host 'No original CK file backup is available; Steam verification may be required.' -ForegroundColor Yellow }
+        }
+        elseif ($retarget) {
+            if ($retargetBackupPath) {
+                Write-Host "Original backup retained at: $retargetBackupPath"
                 Write-Host 'The game will be reset from that backup before applying the new target.'
             }
             else {
@@ -718,32 +901,44 @@ function Invoke-Downgrade([string]$GameKey, $Definition, [string]$TargetVersion,
                 Write-Host 'Steam verification may be required if versions contain different files.' -ForegroundColor Yellow
             }
         }
-        elseif (-not $NoBackup) {
-            $createBackup = Confirm-DefaultYes ("Create a full {0:N1} GB backup? Recommended, but optional" -f ($gameSize / 1GB))
+        elseif (-not $retarget -and -not $NoBackup) {
+            if (Test-CreationKit $Definition) {
+                $createBackup = Confirm-DefaultYes 'Back up the Creation Kit files that will be replaced? Recommended'
+            }
+            else {
+                $createBackup = Confirm-DefaultYes ("Create a full {0:N1} GB backup? Recommended, but optional" -f ($gameSize / 1GB))
+            }
         }
-        if ($createBackup) {
+        if ($createBackup -and (Test-CreationKit $Definition)) {
+            Write-Host 'Creation Kit file backup: stored under the tool state directory'
+            Write-Host 'The parent game is not backed up or changed as a unit.'
+        }
+        elseif ($createBackup) {
             Write-Host "Full backup: $backupPath"
             Write-Host ("Backup size: approximately {0:N1} GB. It remains until restored or deleted by you." -f ($gameSize / 1GB))
         }
-        elseif (-not $retarget) { Write-Host 'Full backup: skipped. Steam must redownload the game if you need to recover it.' -ForegroundColor Yellow }
+        elseif (-not $retarget) {
+            $subject = if (Test-CreationKit $Definition) { 'Creation Kit' } else { 'game' }
+            Write-Host "Backup: skipped. Steam must redownload the $subject if you need to recover it." -ForegroundColor Yellow
+        }
     }
     [void](New-Item -ItemType Directory -Path $DataRoot -Force)
     $downloadSize = [int64]$Definition.download_size_gb * 1GB
     $backupParent = Split-Path -Parent $backupPath
     $dataDrive = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($DataRoot))
     $backupDrive = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($backupParent))
-    if ($createBackup -and $dataDrive -eq $backupDrive) {
+    if ($createBackup -and -not (Test-CreationKit $Definition) -and $dataDrive -eq $backupDrive) {
         Assert-FreeSpace $DataRoot ($downloadSize + $gameSize) 'Depot downloads and the full backup'
     }
     else {
         Assert-FreeSpace $DataRoot $downloadSize 'Depot downloads'
-        if ($createBackup) { Assert-FreeSpace $backupParent $gameSize 'The full backup' }
+        if ($createBackup -and -not (Test-CreationKit $Definition)) { Assert-FreeSpace $backupParent $gameSize 'The full backup' }
     }
     if (-not (Confirm-Action 'Proceed?')) { Write-Host 'Aborted.'; return }
     Test-DirectoryWrite $DataRoot
     if (-not $PreviewOnly) {
         Test-DirectoryWrite $install.GamePath
-        if ($createBackup) { Test-DirectoryWrite (Split-Path -Parent $install.GamePath) }
+        if ($createBackup -and -not (Test-CreationKit $Definition)) { Test-DirectoryWrite (Split-Path -Parent $install.GamePath) }
         Test-FileAttributeWrite $install.AcfPath
         foreach ($config in @(Get-LocalConfigs $steamRoots)) { Test-FileWrite $config }
     }
@@ -765,13 +960,16 @@ function Invoke-Downgrade([string]$GameKey, $Definition, [string]$TargetVersion,
         catch { Start-SteamAgain $steamRoots $steamWasRunning; throw }
     }
     try {
-        if ($retarget -and $existingState.backup_path -and (Test-Path -LiteralPath $existingState.backup_path -PathType Container)) {
+        if ($retarget -and -not (Test-CreationKit $Definition) -and $retargetBackupPath) {
             Write-Host 'Resetting the game from the original backup...'
-            Reset-GameFromBackup $install.GamePath $existingState.backup_path
+            Reset-GameFromBackup $install.GamePath $retargetBackupPath
         }
-        elseif ($createBackup) {
+        elseif ($createBackup -and -not (Test-CreationKit $Definition)) {
             Write-Host 'Creating full backup...'
-            Copy-Tree $install.GamePath $backupPath
+            New-FullBackup $install.GamePath $backupPath
+        }
+        elseif ($createBackup -and (Test-CreationKit $Definition)) {
+            Write-Host 'Backing up the Creation Kit files being replaced...'
         }
         if ($retarget) {
             $state = $existingState
@@ -790,7 +988,7 @@ function Invoke-Downgrade([string]$GameKey, $Definition, [string]$TargetVersion,
             $acfWasReadOnly = Set-ManifestReadOnly $install.AcfPath
         $state = [ordered]@{
                 game_path = $install.GamePath
-                backup_path = $(if ($createBackup) { $backupPath } else { $null })
+                backup_path = $(if ($createBackup -and -not (Test-CreationKit $Definition)) { $backupPath } else { $null })
                 version = $target
                 prior_version = $install.Version
                 prior_buildid = $install.BuildId
@@ -799,6 +997,18 @@ function Invoke-Downgrade([string]$GameKey, $Definition, [string]$TargetVersion,
                 localconfigs = $configState
             timestamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
             recovered = $false
+        }
+    }
+    # Persist Steam's prior settings before component backup work so that even a
+    # later filesystem failure can be restored cleanly on the next run.
+    Save-State $GameKey $state
+    if (Test-CreationKit $Definition) {
+        $existingRecords = @(Get-ComponentRecords $state)
+        if ($createBackup -or $existingRecords.Count -gt 0) {
+            $records = @(Backup-ComponentFiles $GameKey $contentPath $install.GamePath $existingRecords)
+            if ($state -is [Collections.IDictionary]) { $state['component_backup'] = $records }
+            elseif ($state.PSObject.Properties['component_backup']) { $state.component_backup = $records }
+            else { $state | Add-Member -NotePropertyName component_backup -NotePropertyValue $records }
         }
     }
     Save-State $GameKey $state
@@ -822,7 +1032,8 @@ function Invoke-Downgrade([string]$GameKey, $Definition, [string]$TargetVersion,
         if (-not $ManagedRestart) { Start-SteamAgain $steamRoots $steamWasRunning }
     }
     Write-Host "Downgrade complete: $installed" -ForegroundColor Green
-    if ($createBackup) { Write-Host "Backup retained at $backupPath" }
+    if ($createBackup -and (Test-CreationKit $Definition)) { Write-Host "Creation Kit file backup retained at $(Get-ComponentBackupPath $GameKey)" }
+    elseif ($createBackup) { Write-Host "Backup retained at $backupPath" }
 }
 
 function Main {
@@ -832,10 +1043,38 @@ function Main {
     if (-not $Game -and -not $restoreMode) {
         while ($true) {
             $selection = Select-InteractiveAction $games
-            if ($selection.Action -eq 'downgrade') { $gameKey = $selection.Game; break }
-            $gameKey = Select-RestoreGame $games
-            if ($gameKey) { $restoreMode = $true; break }
-            Write-Host 'No previous downgrade state was found.' -ForegroundColor Yellow
+            if ($selection.Action -eq 'exit') { return }
+            if ($selection.Action -eq 'downgrade') {
+                $gameKey = $selection.Game
+                $definition = $games[$gameKey]
+                $script:MenuReturnRequested = $false
+                $script:MenuExitRequested = $false
+                try {
+                    Invoke-Downgrade $gameKey $definition $Version -PreviewOnly:$DryRun -NoBackup:$NoBackup -ReturnToMenu
+                }
+                catch {
+                    Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
+                    if (-not (Wait-ForMainMenu)) { return }
+                    Write-Host ''
+                    continue
+                }
+                if ($script:MenuExitRequested) { return }
+                if ($script:MenuReturnRequested) { Write-Host ''; continue }
+                if (-not (Wait-ForMainMenu)) { return }
+                Write-Host ''
+                continue
+            }
+            $restoreKey = Select-RestoreGame $games
+            if (-not $restoreKey) {
+                Write-Host 'No previous downgrade state was found.' -ForegroundColor Yellow
+                Write-Host ''
+                continue
+            }
+            $restoreDefinition = $games[$restoreKey]
+            $restoreSteamRoots = @(Get-SteamRoots)
+            try { Invoke-Restore $restoreKey $restoreDefinition $restoreSteamRoots }
+            catch { Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red }
+            if (-not (Wait-ForMainMenu)) { return }
             Write-Host ''
         }
     }

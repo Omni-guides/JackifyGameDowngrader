@@ -1,3 +1,4 @@
+import argparse
 import json
 import sys
 import tempfile
@@ -17,7 +18,37 @@ from game_downgrade import cli, paths, steam_lifecycle, swap, updatelock
 class LinuxTests(unittest.TestCase):
     def test_shared_games(self):
         files = sorted(path.stem for path in (ROOT / "games").glob("*.json"))
-        self.assertEqual(files, ["fallout4", "skyrim_se"])
+        self.assertEqual(files, ["fallout4", "fallout4_ck", "skyrim_se", "skyrim_se_ck"])
+
+    def test_creation_kit_definitions_and_recommendations(self):
+        skyrim = cli.load_game("skyrim_se_ck")
+        fallout = cli.load_game("fallout4_ck")
+        self.assertEqual(skyrim["appid"], 1946180)
+        self.assertEqual(skyrim["versions"]["1.6.438"]["recommended_for"], ["1.6.640"])
+        self.assertEqual(fallout["appid"], 1946160)
+        self.assertEqual(fallout["versions"]["1.10.162"]["recommended_for"], ["1.10.163"])
+
+    def test_missing_creation_kit_returns_to_interactive_menu(self):
+        game = cli.load_game("skyrim_se_ck")
+        with patch(
+            "game_downgrade.cli.steam_paths.find_game", return_value=None
+        ), patch("builtins.input", return_value=""):
+            result = cli.cmd_downgrade(
+                argparse.Namespace(
+                    game="skyrim_se_ck", version=None, dry_run=False,
+                    no_backup=False, return_to_menu=True,
+                )
+            )
+        self.assertEqual(cli.RETURN_TO_MENU, result)
+
+    def test_interactive_menu_reopens_after_completed_operation(self):
+        with patch("builtins.input", side_effect=["1", "", "6"]), patch(
+            "game_downgrade.cli.cmd_downgrade",
+            return_value=0,
+        ) as downgrade:
+            result = cli.cmd_interactive(argparse.Namespace())
+        self.assertEqual(0, result)
+        self.assertEqual(1, downgrade.call_count)
 
     def test_update_behavior_round_trip(self):
         text = '"apps"\n{\n"489830"\n{\n"AutoUpdateBehavior" "0"\n}\n}'
@@ -74,6 +105,166 @@ class LinuxTests(unittest.TestCase):
             swap.reset_game_from_backup(game, backup_dir)
             self.assertTrue((game / "original.txt").is_file())
             self.assertTrue((backup_dir / "original.txt").is_file())
+
+    def test_component_backup_restores_only_component_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            install = root / "shared-game"
+            depot = root / "content" / "depot_1"
+            state_dir = root / "state"
+            install.mkdir()
+            depot.mkdir(parents=True)
+            (install / "game.exe").write_text("game untouched")
+            (install / "CreationKit.exe").write_text("new CK")
+            (depot / "CreationKit.exe").write_text("old CK")
+            (depot / "ck-added.ini").write_text("old setting")
+
+            backup = swap.apply_component_downgrade(
+                install, depot.parent, "1.0", "2.0", None, state_dir
+            )
+            self.assertEqual((install / "CreationKit.exe").read_text(), "old CK")
+            self.assertEqual((install / "game.exe").read_text(), "game untouched")
+            self.assertTrue(backup.is_dir())
+
+            swap.restore_component_from_state(state_dir)
+            self.assertEqual((install / "CreationKit.exe").read_text(), "new CK")
+            self.assertEqual((install / "game.exe").read_text(), "game untouched")
+            self.assertFalse((install / "ck-added.ini").exists())
+
+    def test_component_no_backup_records_settings_only_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            install = root / "shared-game"
+            depot = root / "content" / "depot_1"
+            state_dir = root / "state"
+            install.mkdir()
+            depot.mkdir(parents=True)
+            (install / "CreationKit.exe").write_text("current CK")
+            (depot / "CreationKit.exe").write_text("old CK")
+
+            backup = swap.apply_component_downgrade(
+                install, depot.parent, "1.0", "2.0", None, state_dir,
+                create_backup=False,
+            )
+
+            self.assertIsNone(backup)
+            self.assertEqual("old CK", (install / "CreationKit.exe").read_text())
+            self.assertEqual([], swap.load_state(state_dir)["component_backup"])
+            self.assertFalse((state_dir / "file-backup").exists())
+
+    def test_component_retarget_retains_zero_one_and_many_records(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            install = root / "shared-game"
+            first_depot = root / "first-content" / "depot_1"
+            second_depot = root / "second-content" / "depot_1"
+            state_dir = root / "state"
+            install.mkdir()
+            first_depot.mkdir(parents=True)
+            second_depot.mkdir(parents=True)
+            (install / "CreationKit.exe").write_text("current CK")
+            (install / "new-tool.exe").write_text("current tool")
+            (first_depot / "CreationKit.exe").write_text("first old CK")
+            (first_depot / "added.ini").write_text("first added file")
+
+            swap.apply_component_downgrade(
+                install, first_depot.parent, "1.0", "2.0", None, state_dir
+            )
+            first_state = swap.load_state(state_dir)
+            self.assertEqual(2, len(first_state["component_backup"]))
+
+            (second_depot / "CreationKit.exe").write_text("second old CK")
+            (second_depot / "new-tool.exe").write_text("old tool")
+            swap.apply_component_downgrade(
+                install, second_depot.parent, "0.9", "1.0", None, state_dir,
+                create_backup=False, existing_state=first_state,
+            )
+            second_state = swap.load_state(state_dir)
+            self.assertEqual(3, len(second_state["component_backup"]))
+
+            swap.restore_component_from_state(state_dir)
+            self.assertEqual("current CK", (install / "CreationKit.exe").read_text())
+            self.assertEqual("current tool", (install / "new-tool.exe").read_text())
+            self.assertFalse((install / "added.ini").exists())
+
+    def test_component_retarget_normalizes_legacy_single_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            install = root / "shared-game"
+            depot = root / "content" / "depot_1"
+            state_dir = root / "state"
+            backup_dir = state_dir / "file-backup"
+            install.mkdir()
+            depot.mkdir(parents=True)
+            backup_dir.mkdir(parents=True)
+            (install / "CreationKit.exe").write_text("first downgrade")
+            (install / "tool.exe").write_text("current tool")
+            (depot / "tool.exe").write_text("old tool")
+            (backup_dir / "CreationKit.exe").write_text("original CK")
+            legacy_state = {
+                "game_path": str(install),
+                "backup_path": None,
+                "component_backup": {"path": "CreationKit.exe", "existed": True},
+            }
+
+            swap.apply_component_downgrade(
+                install, depot.parent, "0.9", "1.0", None, state_dir,
+                create_backup=False, existing_state=legacy_state,
+            )
+            self.assertEqual(2, len(swap.load_state(state_dir)["component_backup"]))
+
+            swap.restore_component_from_state(state_dir)
+            self.assertEqual("original CK", (install / "CreationKit.exe").read_text())
+            self.assertEqual("current tool", (install / "tool.exe").read_text())
+
+    def test_backup_copy_failure_leaves_settings_only_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            game = root / "game"
+            depot = root / "content" / "depot_1"
+            state_dir = root / "state"
+            game.mkdir()
+            depot.mkdir(parents=True)
+            (game / "game.exe").write_text("current")
+            (depot / "game.exe").write_text("old")
+
+            with patch("game_downgrade.swap.shutil.copytree", side_effect=OSError("copy failed")):
+                with self.assertRaises(OSError):
+                    swap.apply_downgrade(
+                        game, depot.parent, "1.0", "2.0", None, state_dir,
+                        localconfigs=[{"path": "/config", "prior_value": "0"}],
+                    )
+
+            state = swap.load_state(state_dir)
+            self.assertIsNotNone(state)
+            self.assertIsNone(state["backup_path"])
+            self.assertEqual("0", state["localconfigs"][0]["prior_value"])
+            self.assertEqual("current", (game / "game.exe").read_text())
+            self.assertFalse(any(root.glob(".jgd-backup-staging-*")))
+
+    def test_component_backup_failure_leaves_restorable_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            install = root / "shared-game"
+            depot = root / "content" / "depot_1"
+            state_dir = root / "state"
+            install.mkdir()
+            depot.mkdir(parents=True)
+            (install / "CreationKit.exe").write_text("current")
+            (depot / "CreationKit.exe").write_text("old")
+
+            with patch("game_downgrade.swap.shutil.copy2", side_effect=OSError("copy failed")):
+                with self.assertRaises(OSError):
+                    swap.apply_component_downgrade(
+                        install, depot.parent, "1.0", "2.0", None, state_dir,
+                        localconfigs=[{"path": "/config", "prior_value": "0"}],
+                    )
+
+            state = swap.load_state(state_dir)
+            self.assertEqual([], state["component_backup"])
+            self.assertEqual("0", state["localconfigs"][0]["prior_value"])
+            self.assertEqual("current", (install / "CreationKit.exe").read_text())
+            self.assertFalse(any(state_dir.glob("file-backup-staging-*")))
 
     def test_backup_state_marker(self):
         with tempfile.TemporaryDirectory() as directory:
