@@ -9,17 +9,21 @@ from pathlib import Path
 BACKUP_STATE = ".jackify-game-downgrader.json"
 
 
-def _content_files(content_dir: Path):
-    for depot_dir in sorted(content_dir.iterdir()):
+def _content_files(content_dir: Path, depot_ids: list[str] | None = None):
+    depot_dirs = (
+        (content_dir / f"depot_{depot_id}" for depot_id in depot_ids)
+        if depot_ids is not None else sorted(content_dir.iterdir())
+    )
+    for depot_dir in depot_dirs:
         if not depot_dir.is_dir():
             continue
         for src in (p for p in depot_dir.rglob("*") if p.is_file()):
             yield src, src.relative_to(depot_dir)
 
 
-def preview_downgrade(game_path: Path, content_dir: Path) -> tuple[list[str], list[str]]:
+def preview_downgrade(game_path: Path, content_dir: Path, depot_ids: list[str] | None = None) -> tuple[list[str], list[str]]:
     overwrite, new = [], []
-    for _src, rel in _content_files(content_dir):
+    for _src, rel in _content_files(content_dir, depot_ids):
         (overwrite if (game_path / rel).is_file() else new).append(str(rel))
     return overwrite, new
 
@@ -37,6 +41,7 @@ def apply_component_downgrade(
     create_backup: bool = True,
     existing_state: dict | None = None,
     localconfigs: list[dict] | None = None,
+    depot_ids: list[str] | None = None,
 ) -> Path | None:
     """Apply a shared-directory component without backing up its parent game."""
     existing_records = (existing_state.get("component_backup") or []) if existing_state else []
@@ -66,7 +71,7 @@ def apply_component_downgrade(
     if backup_path is not None:
         with tempfile.TemporaryDirectory(prefix="file-backup-staging-", dir=data_dir) as staging:
             staging_path = Path(staging)
-            for _src, rel in _content_files(content_dir):
+            for _src, rel in _content_files(content_dir, depot_ids):
                 rel_text = str(rel)
                 if rel_text in recorded:
                     continue
@@ -86,7 +91,7 @@ def apply_component_downgrade(
     state["component_backup"] = records
     save_state(data_dir, state)
 
-    for src, rel in _content_files(content_dir):
+    for src, rel in _content_files(content_dir, depot_ids):
         dest = install_path / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dest)
@@ -165,6 +170,7 @@ def apply_downgrade(
     create_backup: bool = True,
     existing_state: dict | None = None,
     localconfigs: list[dict] | None = None,
+    depot_ids: list[str] | None = None,
 ) -> Path | None:
     if existing_state is not None:
         state = dict(existing_state)
@@ -199,7 +205,7 @@ def apply_downgrade(
     if backup_path is not None:
         (backup_path / BACKUP_STATE).write_text(json.dumps(state, indent=2))
 
-    for src, rel in _content_files(content_dir):
+    for src, rel in _content_files(content_dir, depot_ids):
         dest = game_path / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dest)

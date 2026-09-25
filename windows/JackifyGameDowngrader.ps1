@@ -199,6 +199,7 @@ function Find-GameInstall([string[]]$Libraries, $Definition) {
             LibraryRoot = $library
             AcfPath = $acf
             BuildId = Get-VdfValue $text 'buildid'
+            Language = Get-VdfValue $text 'language'
             Version = [Diagnostics.FileVersionInfo]::GetVersionInfo($exe).FileVersion
         }
     }
@@ -346,11 +347,51 @@ function Write-SteamCmdProgress([string]$Text) {
     [Console]::Write("`r{0}`r", $Text.PadRight($width))
 }
 
-function Assert-SteamCmdDownloads([string]$LogPath, [int]$LogOffset, $VersionEntry) {
+function Get-ManifestEntries($Manifests) {
+    if ($Manifests -is [Collections.IDictionary]) {
+        foreach ($entry in $Manifests.GetEnumerator()) {
+            [pscustomobject]@{ Name = [string]$entry.Key; Value = [string]$entry.Value }
+        }
+        return
+    }
+    foreach ($entry in $Manifests.PSObject.Properties) {
+        [pscustomobject]@{ Name = [string]$entry.Name; Value = [string]$entry.Value }
+    }
+}
+
+function Add-Manifests([Collections.IDictionary]$Destination, $Source) {
+    foreach ($entry in @(Get-ManifestEntries $Source)) { $Destination[$entry.Name] = $entry.Value }
+}
+
+function Resolve-Manifests($Definition, $VersionEntry, $Install) {
+    $result = [ordered]@{}
+    Add-Manifests $result $VersionEntry.manifests
+    if (-not $VersionEntry.PSObject.Properties['language_manifests']) { return $result }
+    $language = [string]$Install.Language
+    $languageEntry = if ($language) { $VersionEntry.language_manifests.PSObject.Properties[$language] } else { $null }
+    if (-not $languageEntry) {
+        $supported = @($VersionEntry.language_manifests.PSObject.Properties.Name) -join ', '
+        throw "$($Definition.name) target files are not yet available for Steam language '$language'. Supported language: $supported. The game was not changed."
+    }
+    Add-Manifests $result $languageEntry.Value
+    foreach ($dlc in @($VersionEntry.dlc)) {
+        if (-not (Test-Path -LiteralPath (Join-Path $Install.GamePath $dlc.detect_file) -PathType Leaf)) { continue }
+        Add-Manifests $result $dlc.manifests
+        if ($dlc.PSObject.Properties['language_manifests']) {
+            $dlcLanguage = $dlc.language_manifests.PSObject.Properties[$language]
+            if (-not $dlcLanguage) { throw "$($dlc.name) target files are not yet available for Steam language '$language'. The game was not changed." }
+            Add-Manifests $result $dlcLanguage.Value
+        }
+    }
+    return $result
+}
+
+function Assert-SteamCmdDownloads([string]$LogPath, [int]$LogOffset, $Manifests) {
     if (-not (Test-Path -LiteralPath $LogPath -PathType Leaf)) { throw 'SteamCMD did not create its console log.' }
     $log = Read-SteamCmdLog $LogPath
     $currentRun = if ($log.Length -gt $LogOffset) { $log.Substring($LogOffset) } else { '' }
-    foreach ($manifest in $VersionEntry.manifests.PSObject.Properties) {
+    $manifestSource = if ($Manifests.PSObject.Properties['manifests']) { $Manifests.manifests } else { $Manifests }
+    foreach ($manifest in @(Get-ManifestEntries $manifestSource)) {
         $pattern = 'Depot download complete.*\(manifest ' + [regex]::Escape([string]$manifest.Value) + '\)'
         if ($currentRun -notmatch $pattern) {
             throw "SteamCMD did not confirm depot $($manifest.Name) manifest $($manifest.Value)."
@@ -501,8 +542,15 @@ function Reset-GameFromBackup([string]$GamePath, [string]$BackupPath) {
     }
 }
 
-function Get-DepotFiles([string]$ContentPath) {
-    foreach ($depot in Get-ChildItem -LiteralPath $ContentPath -Directory | Sort-Object Name) {
+function Get-DepotFiles([string]$ContentPath, $Manifests = $null) {
+    $depots = if ($null -eq $Manifests) {
+        @(Get-ChildItem -LiteralPath $ContentPath -Directory | Sort-Object Name)
+    }
+    else {
+        @((Get-ManifestEntries $Manifests | ForEach-Object { Get-Item -LiteralPath (Join-Path $ContentPath "depot_$($_.Name)") -ErrorAction SilentlyContinue }))
+    }
+    foreach ($depot in $depots) {
+        if (-not $depot -or -not $depot.PSIsContainer) { continue }
         $root = $depot.FullName.TrimEnd('\') + '\'
         foreach ($file in Get-ChildItem -LiteralPath $depot.FullName -File -Recurse -Force) {
             [pscustomobject]@{ Source = $file.FullName; Relative = $file.FullName.Substring($root.Length) }
@@ -510,8 +558,8 @@ function Get-DepotFiles([string]$ContentPath) {
     }
 }
 
-function Install-DepotFiles([string]$ContentPath, [string]$GamePath) {
-    foreach ($file in Get-DepotFiles $ContentPath) {
+function Install-DepotFiles([string]$ContentPath, [string]$GamePath, $Manifests = $null) {
+    foreach ($file in Get-DepotFiles $ContentPath $Manifests) {
         $target = Join-Path $GamePath $file.Relative
         [void](New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force)
         Copy-Item -LiteralPath $file.Source -Destination $target -Force
@@ -536,7 +584,7 @@ function Get-ComponentRecords($State) {
     }
 }
 
-function Backup-ComponentFiles([string]$GameKey, [string]$ContentPath, [string]$GamePath, $ExistingRecords) {
+function Backup-ComponentFiles([string]$GameKey, [string]$ContentPath, [string]$GamePath, $ExistingRecords, $Manifests = $null) {
     $backupPath = Get-ComponentBackupPath $GameKey
     $stagingPath = Join-Path (Split-Path -Parent $backupPath) ('file-backup-staging-' + [guid]::NewGuid().ToString('N'))
     $records = [Collections.ArrayList]::new()
@@ -548,7 +596,7 @@ function Backup-ComponentFiles([string]$GameKey, [string]$ContentPath, [string]$
     }
     try {
         [void](New-Item -ItemType Directory -Path $stagingPath -Force)
-        foreach ($file in Get-DepotFiles $ContentPath) {
+        foreach ($file in Get-DepotFiles $ContentPath $Manifests) {
             if ($recorded.ContainsKey($file.Relative)) { continue }
             $target = Join-Path $GamePath $file.Relative
             $existed = Test-Path -LiteralPath $target -PathType Leaf
@@ -591,13 +639,21 @@ function Restore-ComponentFiles([string]$GameKey, [string]$GamePath, $Records) {
     if (Test-Path -LiteralPath $backupPath -PathType Container) { Remove-Item -LiteralPath $backupPath -Recurse -Force }
 }
 
-function Get-DepotPreview([string]$ContentPath, [string]$GamePath) {
+function Get-DepotPreview([string]$ContentPath, [string]$GamePath, $Manifests = $null) {
     $overwrite = 0
     $new = 0
-    foreach ($file in Get-DepotFiles $ContentPath) {
+    foreach ($file in Get-DepotFiles $ContentPath $Manifests) {
         if (Test-Path -LiteralPath (Join-Path $GamePath $file.Relative) -PathType Leaf) { $overwrite++ } else { $new++ }
     }
     return [pscustomobject]@{ Overwrite = $overwrite; New = $new }
+}
+
+function Get-StagedExecutableVersion([string]$ContentPath, $Manifests, [string]$MainExe) {
+    $candidate = Get-DepotFiles $ContentPath $Manifests |
+        Where-Object { $_.Relative -ieq $MainExe } |
+        Select-Object -First 1
+    if (-not $candidate) { throw "Downloaded depots do not contain $MainExe. The game was not changed." }
+    return [Diagnostics.FileVersionInfo]::GetVersionInfo($candidate.Source).FileVersion
 }
 
 function Get-SteamCmd {
@@ -631,11 +687,11 @@ function Get-SteamCmd {
     return $exe
 }
 
-function Download-Depots([string]$Username, $Definition, $VersionEntry) {
+function Download-Depots([string]$Username, $Definition, $Manifests) {
     $exe = Get-SteamCmd
     Write-Host 'Starting SteamCMD login...'
     $arguments = @('+login', $Username)
-    foreach ($manifest in $VersionEntry.manifests.PSObject.Properties) {
+    foreach ($manifest in @(Get-ManifestEntries $Manifests)) {
         $arguments += @('+download_depot', [string]$Definition.appid, $manifest.Name, [string]$manifest.Value)
     }
     $arguments += '+quit'
@@ -643,14 +699,14 @@ function Download-Depots([string]$Username, $Definition, $VersionEntry) {
     $logOffset = if (Test-Path -LiteralPath $logPath -PathType Leaf) { (Read-SteamCmdLog $logPath).Length } else { 0 }
     $process = Start-Process -FilePath $exe -ArgumentList $arguments -NoNewWindow -PassThru
     Wait-SteamCmdWithProgress $process (Split-Path -Parent $exe) ([string]$Definition.appid) $logOffset
-    Assert-SteamCmdDownloads $logPath $logOffset $VersionEntry
+    Assert-SteamCmdDownloads $logPath $logOffset $Manifests
     $appPath = Join-Path (Split-Path -Parent $exe) "steamapps\content\app_$($Definition.appid)"
     if (-not (Test-Path -LiteralPath $appPath -PathType Container)) {
         $match = Get-ChildItem -LiteralPath (Split-Path -Parent $exe) -Directory -Recurse -Filter "app_$($Definition.appid)" | Select-Object -First 1
         if (-not $match) { throw 'SteamCMD depot output was not found.' }
         $appPath = $match.FullName
     }
-    foreach ($manifest in $VersionEntry.manifests.PSObject.Properties) {
+    foreach ($manifest in @(Get-ManifestEntries $Manifests)) {
         if (-not (Test-Path -LiteralPath (Join-Path $appPath "depot_$($manifest.Name)") -PathType Container)) {
             throw "Depot $($manifest.Name) was not downloaded."
         }
@@ -868,6 +924,7 @@ function Invoke-Downgrade([string]$GameKey, $Definition, [string]$TargetVersion,
     }
     $target = Select-Version $Definition $TargetVersion $parentVersion
     $entry = $Definition.versions.PSObject.Properties[$target].Value
+    $manifests = Resolve-Manifests $Definition $entry $install
     if ((Test-CreationKit $Definition) -and $parentVersion -and $entry.PSObject.Properties['recommended_for']) {
         $matchesParent = $false
         foreach ($item in @($entry.recommended_for)) {
@@ -945,9 +1002,13 @@ function Invoke-Downgrade([string]$GameKey, $Definition, [string]$TargetVersion,
     $username = (Read-Host 'Steam username for SteamCMD').Trim()
     if (-not $username) { throw 'A Steam username is required.' }
     Write-Host 'SteamCMD handles your password and Steam Guard prompts directly.'
-    $contentPath = Download-Depots $username $Definition $entry
+    $contentPath = Download-Depots $username $Definition $manifests
+    $stagedVersion = Get-StagedExecutableVersion $contentPath $manifests $Definition.main_exe
+    if (-not $stagedVersion.StartsWith($target, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Expected downloaded $($Definition.main_exe) version $target, but it reports $stagedVersion. The game was not changed."
+    }
     if ($PreviewOnly) {
-        $preview = Get-DepotPreview $contentPath $install.GamePath
+        $preview = Get-DepotPreview $contentPath $install.GamePath $manifests
         Write-Host "Would overwrite $($preview.Overwrite) files and add $($preview.New) files."
         Remove-Item -LiteralPath $contentPath -Recurse -Force
         return
@@ -1005,7 +1066,7 @@ function Invoke-Downgrade([string]$GameKey, $Definition, [string]$TargetVersion,
     if (Test-CreationKit $Definition) {
         $existingRecords = @(Get-ComponentRecords $state)
         if ($createBackup -or $existingRecords.Count -gt 0) {
-            $records = @(Backup-ComponentFiles $GameKey $contentPath $install.GamePath $existingRecords)
+            $records = @(Backup-ComponentFiles $GameKey $contentPath $install.GamePath $existingRecords $manifests)
             if ($state -is [Collections.IDictionary]) { $state['component_backup'] = $records }
             elseif ($state.PSObject.Properties['component_backup']) { $state.component_backup = $records }
             else { $state | Add-Member -NotePropertyName component_backup -NotePropertyValue $records }
@@ -1020,10 +1081,10 @@ function Invoke-Downgrade([string]$GameKey, $Definition, [string]$TargetVersion,
         )
     }
         Write-Host 'Installing depot files...'
-        Install-DepotFiles $contentPath $install.GamePath
+        Install-DepotFiles $contentPath $install.GamePath $manifests
         $installed = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $install.GamePath $Definition.main_exe)).FileVersion
         if (-not $installed.StartsWith($target, [StringComparison]::OrdinalIgnoreCase)) {
-            throw "Expected $target, but the installed executable reports $installed. The backup is intact."
+            throw "Expected $target, but the installed executable reports $installed. $(if ($state.backup_path) { 'The backup is intact.' } else { 'Steam Verify can recover the game.' })"
         }
         Remove-ContentCatalog $Definition
         Remove-Item -LiteralPath $contentPath -Recurse -Force

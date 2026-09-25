@@ -30,6 +30,7 @@ class GameInstall:
     acf_path: Path
     buildid: str | None
     version: str | None
+    language: str | None = None
 
 
 def _dedupe(paths: list[Path]) -> list[Path]:
@@ -71,6 +72,7 @@ def find_game(appid: int, main_exe: str) -> GameInstall | None:
                 acf_path=acf_path,
                 buildid=_vdf_value(text, "buildid"),
                 version=read_file_version(exe_path),
+                language=_vdf_value(text, "language"),
             )
     return None
 

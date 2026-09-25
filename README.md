@@ -329,9 +329,9 @@ Dry run downloads and checks the real depot data but does not modify the game, S
 ## Supported versions
 
 - Skyrim Special Edition: 1.6.1170, 1.6.640, 1.5.97
-- Fallout 4: 1.10.163
+- Fallout 4: 1.10.163, 1.10.984, and 1.11.221
 - Skyrim Special Edition Creation Kit: 1.6.1130 (recommended for game 1.6.1170), 1.6.438 (recommended for game 1.6.640)
-- Fallout 4 Creation Kit: 1.10.162 (recommended for game 1.10.163)
+- Fallout 4 Creation Kit: 1.10.162 (for game 1.10.163), 1.10.982.3 (for game 1.10.984), and 1.11.221 (for game 1.11.221)
 
 Skyrim 1.5.97's matching CK 1.5.73 is not available as a Steam depot and requires a separate binary patcher, so it is not an automatic target. The tool shows the installed parent-game version, marks its matching CK target as recommended, and warns before an interactive mismatched selection. An explicit command-line version remains available for advanced authoring setups.
 
@@ -340,9 +340,10 @@ Skyrim 1.5.97's matching CK 1.5.73 is not available as a Steam depot and require
 Before continuing, the tool shows the game path, backup choice, and required disk space. It then:
 
 - Downloads the selected depots through SteamCMD.
+- For Fallout 4, detects installed official DLC and downloads matching target depots for it. The current Fallout targets support Steam's English language depot; other Steam languages stop before any game files are changed rather than producing a mixed-language install.
 - Closes Steam before changing any files and starts it again afterward.
 - Optionally copies the complete current game folder to a version-labelled backup beside it.
-- Installs the selected depot files.
+- Installs only the selected depot files, by overwriting or adding files; a normal downgrade does not delete game, mod, or Creation Club files.
 - Sets Steam to update the game only when launched.
 - On Windows, marks the app manifest read-only.
 - Removes stale `ContentCatalog.txt` data that can crash an older game build.
@@ -365,7 +366,7 @@ Depot downloads are removed after success and retained after failure so the oper
 Build local release files in the workspace-level `../dist/` directory:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-release.ps1 -Version 0.2.5
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-release.ps1 -Version 0.2.6
 ```
 
 ## License

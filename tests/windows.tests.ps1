@@ -25,6 +25,8 @@ try {
     Assert-Equal 'SkyrimSE.exe' $games['skyrim_se'].main_exe 'game data'
     Assert-True (Test-CreationKit $games['skyrim_se_ck']) 'creation kit definition type'
     Assert-Equal 1946160 $games['fallout4_ck'].appid 'fallout creation kit app id'
+    Assert-True ($games['fallout4'].versions.PSObject.Properties.Name -contains '1.11.221') 'fallout 1.11.221 target exists'
+    Assert-True ($games['fallout4_ck'].versions.PSObject.Properties.Name -contains '1.10.982.3') 'fallout CK 1.10.982.3 target exists'
     Assert-Equal 0 @(Get-ComponentRecords $null).Count 'null component records normalize to empty array'
     Assert-Equal 0 @(Get-ComponentRecords ([ordered]@{})).Count 'missing component records normalize to empty array'
     $oneRecordState = [ordered]@{ component_backup = [pscustomobject]@{ path = 'CreationKit.exe'; existed = $true } }
@@ -98,6 +100,15 @@ try {
     Assert-Equal 1 $preview.New 'preview new'
     Install-DepotFiles $content $game
     Assert-Equal 'new' ([IO.File]::ReadAllText((Join-Path $game 'Data\old.txt'))) 'depot overwrite'
+    [IO.File]::WriteAllText((Join-Path $content 'depot_2\stale.txt'), 'stale')
+    $selectedPreview = Get-DepotPreview $content $game ([ordered]@{ '1' = 'target-manifest' })
+    Assert-Equal 1 $selectedPreview.Overwrite 'selected depot preview overwrite'
+    Assert-Equal 0 $selectedPreview.New 'selected depot preview ignores stale depot'
+    $selectedGame = Join-Path $temp 'selected-game'
+    [void](New-Item -ItemType Directory -Path $selectedGame -Force)
+    Install-DepotFiles $content $selectedGame ([ordered]@{ '1' = 'target-manifest' })
+    Assert-True (Test-Path -LiteralPath (Join-Path $selectedGame 'Data\old.txt')) 'selected depot install copies requested depot'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $selectedGame 'stale.txt'))) 'selected depot install ignores stale depot'
 
     $componentGame = Join-Path $temp 'component-game'
     $componentContent = Join-Path $temp 'component-content\depot_1'

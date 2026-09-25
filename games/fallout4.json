@@ -4,14 +4,55 @@
   "main_exe": "Fallout4.exe",
   "localappdata_dir": "Fallout4",
   "download_size_gb": 40,
-  "depots": [377161, 377162, 377163],
+  "depots": [377161, 377162, 377163, 377164, 435870, 435871, 435880, 435881, 435882, 480630, 480631, 393885, 490650, 393895],
   "versions": {
     "1.10.163": {
       "manifests": {
         "377161": "7497069378349273908",
         "377162": "5847529232406005096",
         "377163": "5819088023757897745"
-      }
+      },
+      "language_manifests": { "english": { "377164": "2178106366609958945" } },
+      "dlc": [
+        { "name": "Automatron", "detect_file": "Data/DLCRobot.esm", "manifests": { "435870": "1691678129192680960" }, "language_manifests": { "english": { "435871": "5106118861901111234" } } },
+        { "name": "Wasteland Workshop", "detect_file": "Data/DLCworkshop01.esm", "manifests": { "435880": "1255562923187931216" } },
+        { "name": "Far Harbor", "detect_file": "Data/DLCCoast.esm", "manifests": { "435881": "1207717296920736193" }, "language_manifests": { "english": { "435882": "8482181819175811242" } } },
+        { "name": "Contraptions Workshop", "detect_file": "Data/DLCworkshop02.esm", "manifests": { "480630": "5527412439359349504" } },
+        { "name": "Vault-Tec Workshop", "detect_file": "Data/DLCworkshop03.esm", "manifests": { "480631": "6588493486198824788" }, "language_manifests": { "english": { "393885": "5000262035721758737" } } },
+        { "name": "Nuka-World", "detect_file": "Data/DLCNukaWorld.esm", "manifests": { "490650": "4873048792354485093" }, "language_manifests": { "english": { "393895": "7677765994120765493" } } }
+      ]
+    },
+    "1.10.984": {
+      "manifests": {
+        "377161": "7332110922360867314",
+        "377162": "5698952341602575696",
+        "377163": "8681102885670959037"
+      },
+      "language_manifests": { "english": { "377164": "8492427313392140315" } },
+      "dlc": [
+        { "name": "Automatron", "detect_file": "Data/DLCRobot.esm", "manifests": { "435870": "1213339795579796878" }, "language_manifests": { "english": { "435871": "7785009542965564688" } } },
+        { "name": "Wasteland Workshop", "detect_file": "Data/DLCworkshop01.esm", "manifests": { "435880": "366079256218893805" } },
+        { "name": "Far Harbor", "detect_file": "Data/DLCCoast.esm", "manifests": { "435881": "1207717296920736193" }, "language_manifests": { "english": { "435882": "8482181819175811242" } } },
+        { "name": "Contraptions Workshop", "detect_file": "Data/DLCworkshop02.esm", "manifests": { "480630": "5527412439359349504" } },
+        { "name": "Vault-Tec Workshop", "detect_file": "Data/DLCworkshop03.esm", "manifests": { "480631": "6588493486198824788" }, "language_manifests": { "english": { "393885": "5000262035721758737" } } },
+        { "name": "Nuka-World", "detect_file": "Data/DLCNukaWorld.esm", "manifests": { "490650": "4873048792354485093" }, "language_manifests": { "english": { "393895": "7677765994120765493" } } }
+      ]
+    },
+    "1.11.221": {
+      "manifests": {
+        "377161": "5983086794954940044",
+        "377162": "387388833281246371",
+        "377163": "8363807899725426636"
+      },
+      "language_manifests": { "english": { "377164": "8492427313392140315" } },
+      "dlc": [
+        { "name": "Automatron", "detect_file": "Data/DLCRobot.esm", "manifests": { "435870": "1213339795579796878" }, "language_manifests": { "english": { "435871": "4060235024162383907" } } },
+        { "name": "Wasteland Workshop", "detect_file": "Data/DLCworkshop01.esm", "manifests": { "435880": "7797822138743384972" } },
+        { "name": "Far Harbor", "detect_file": "Data/DLCCoast.esm", "manifests": { "435881": "1207717296920736193" }, "language_manifests": { "english": { "435882": "8482181819175811242" } } },
+        { "name": "Contraptions Workshop", "detect_file": "Data/DLCworkshop02.esm", "manifests": { "480630": "5527412439359349504" } },
+        { "name": "Vault-Tec Workshop", "detect_file": "Data/DLCworkshop03.esm", "manifests": { "480631": "6588493486198824788" }, "language_manifests": { "english": { "393885": "5000262035721758737" } } },
+        { "name": "Nuka-World", "detect_file": "Data/DLCNukaWorld.esm", "manifests": { "490650": "4873048792354485093" }, "language_manifests": { "english": { "393895": "7677765994120765493" } } }
+      ]
     }
   }
 }

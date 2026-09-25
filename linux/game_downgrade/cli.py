@@ -48,6 +48,36 @@ def _is_component(game: dict) -> bool:
     return game.get("component") == "creation_kit"
 
 
+def _resolve_manifests(game: dict, entry: dict, install: steam_paths.GameInstall) -> dict[str, str]:
+    """Return only the target depots that apply to this installed game."""
+    manifests = dict(entry["manifests"])
+    language_manifests = entry.get("language_manifests")
+    if language_manifests is None:
+        return manifests
+    language = install.language
+    if language not in language_manifests:
+        supported = ", ".join(sorted(language_manifests))
+        raise RuntimeError(
+            f"{game['name']} target files are not yet available for Steam language "
+            f"'{language or 'unknown'}'. Supported language: {supported}. "
+            "The game was not changed."
+        )
+    manifests.update(language_manifests[language])
+    for dlc in entry.get("dlc", []):
+        if not (install.game_path / dlc["detect_file"]).is_file():
+            continue
+        manifests.update(dlc["manifests"])
+        dlc_languages = dlc.get("language_manifests")
+        if dlc_languages is not None:
+            if language not in dlc_languages:
+                raise RuntimeError(
+                    f"{dlc['name']} target files are not yet available for Steam language "
+                    f"'{language}'. The game was not changed."
+                )
+            manifests.update(dlc_languages[language])
+    return manifests
+
+
 def _parent_version(game: dict) -> str | None:
     if not _is_component(game):
         return None
@@ -381,6 +411,7 @@ def cmd_downgrade(args: argparse.Namespace) -> int:
             return 1
 
     entry = versions[version_key]
+    manifests = _resolve_manifests(game, entry, install)
     data_dir = game_data_dir(game_key)
     existing_state = swap.load_state(data_dir)
     retarget = existing_state is not None
@@ -465,10 +496,23 @@ def cmd_downgrade(args: argparse.Namespace) -> int:
         print("A Steam username is required: steamcmd needs to log in to fetch the depots.")
         return 1
     print()
-    content_dir = steamcmd.download_depots(username, game["appid"], entry["manifests"])
+    content_dir = steamcmd.download_depots(username, game["appid"], manifests)
+    staged_executable = next(
+        (source for source, relative in swap._content_files(content_dir, list(manifests))
+         if relative.as_posix().lower() == game["main_exe"].lower()),
+        None,
+    )
+    if staged_executable is None:
+        raise RuntimeError(f"Downloaded depots do not contain {game['main_exe']}. The game was not changed.")
+    staged_version = read_file_version(staged_executable)
+    if staged_version is None or not staged_version.startswith(version_key):
+        raise RuntimeError(
+            f"Expected downloaded {game['main_exe']} version {version_key}, but it reports "
+            f"{staged_version or 'an unknown version'}. The game was not changed."
+        )
 
     if args.dry_run:
-        overwrite, new = swap.preview_downgrade(install.game_path, content_dir)
+        overwrite, new = swap.preview_downgrade(install.game_path, content_dir, list(manifests))
         shutil.rmtree(content_dir, ignore_errors=True)
         _section("Result")
         print(f"Would overwrite {len(overwrite)} existing file(s) and add {len(new)} new file(s).")
@@ -520,6 +564,7 @@ def cmd_downgrade(args: argparse.Namespace) -> int:
             create_backup=create_backup,
             existing_state=existing_state,
             localconfigs=localconfig_states,
+            depot_ids=list(manifests),
         )
         if backup_path is not None:
             label = "Creation Kit file backup" if _is_component(game) else "Backup"
@@ -531,7 +576,8 @@ def cmd_downgrade(args: argparse.Namespace) -> int:
         if installed_version is None or not installed_version.startswith(version_key):
             raise RuntimeError(
                 f"Expected {version_key}, but the installed executable reports "
-                f"{installed_version or 'an unknown version'}. The backup is intact."
+                f"{installed_version or 'an unknown version'}. "
+                f"{'The backup is intact.' if backup_path else 'Steam Verify can recover the game.'}"
             )
 
         shutil.rmtree(content_dir, ignore_errors=True)

@@ -27,6 +27,26 @@ class LinuxTests(unittest.TestCase):
         self.assertEqual(skyrim["versions"]["1.6.438"]["recommended_for"], ["1.6.640"])
         self.assertEqual(fallout["appid"], 1946160)
         self.assertEqual(fallout["versions"]["1.10.162"]["recommended_for"], ["1.10.163"])
+        self.assertEqual(fallout["versions"]["1.10.982.3"]["recommended_for"], ["1.10.984"])
+        self.assertEqual(fallout["versions"]["1.11.221"]["recommended_for"], ["1.11.221"])
+
+    def test_fallout_manifest_selection_is_language_and_dlc_aware(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            game_path = root / "Fallout 4"
+            (game_path / "Data").mkdir(parents=True)
+            (game_path / "Data" / "DLCRobot.esm").write_text("")
+            acf = root / "appmanifest_377160.acf"
+            install = cli.steam_paths.GameInstall(game_path, root, acf, None, "1.11.240", "english")
+            game = cli.load_game("fallout4")
+            manifests = cli._resolve_manifests(game, game["versions"]["1.11.221"], install)
+            self.assertIn("377164", manifests)
+            self.assertIn("435870", manifests)
+            self.assertIn("435871", manifests)
+            self.assertNotIn("435880", manifests)
+            install.language = "german"
+            with self.assertRaisesRegex(RuntimeError, "Supported language: english"):
+                cli._resolve_manifests(game, game["versions"]["1.11.221"], install)
 
     def test_missing_creation_kit_returns_to_interactive_menu(self):
         game = cli.load_game("skyrim_se_ck")
@@ -87,7 +107,13 @@ class LinuxTests(unittest.TestCase):
             (game / "old.txt").write_text("old")
             (depot / "old.txt").write_text("new")
             (depot / "new.txt").write_text("new")
+            stale = root / "content" / "depot_999"
+            stale.mkdir()
+            (stale / "stale.txt").write_text("stale")
             overwrite, new = swap.preview_downgrade(game, depot.parent)
+            self.assertEqual(overwrite, ["old.txt"])
+            self.assertEqual(new, ["new.txt", "stale.txt"])
+            overwrite, new = swap.preview_downgrade(game, depot.parent, ["1"])
             self.assertEqual(overwrite, ["old.txt"])
             self.assertEqual(new, ["new.txt"])
             backup = swap.apply_downgrade(
